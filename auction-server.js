@@ -617,39 +617,39 @@ if (isDev) {
     console.log('Running in development mode: static files served by Vite dev server.');
 } else {
     // Production: serve static files from dist
-    server = http.createServer(async (req, res) => {
-        if (await handleApi(req, res)) return;
-        let filePath = req.url === '/' ? INDEX_FILE : path.join(DIST_DIR, req.url);
-        fs.stat(filePath, (err, stats) => {
-            if (err || !stats.isFile()) {
-                // SPA fallback: serve index.html for non-API routes
-                fs.readFile(INDEX_FILE, (readErr, data) => {
-                    if (readErr) {
-                        res.writeHead(404, { 'Content-Type': 'text/plain' });
-                        res.end('404 Not Found');
-                        return;
-                    }
-                    res.writeHead(200, { 'Content-Type': 'text/html' });
-                    res.end(data);
-                });
-                return;
-            }
-            const ext = path.extname(filePath).toLowerCase();
-            const mimeTypes = {
-                '.html': 'text/html',
-                '.js': 'application/javascript',
-                '.css': 'text/css',
-                '.svg': 'image/svg+xml',
-                '.json': 'application/json',
-                '.png': 'image/png',
-                '.jpg': 'image/jpeg',
-                '.ico': 'image/x-icon',
-            };
-            res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' });
-            fs.createReadStream(filePath).pipe(res);
-        });
-    });
-    console.log('Running in production mode: static files served from dist/.');
+    // server = http.createServer(async (req, res) => {
+    //     if (await handleApi(req, res)) return;
+    //     let filePath = req.url === '/' ? INDEX_FILE : path.join(DIST_DIR, req.url);
+    //     fs.stat(filePath, (err, stats) => {
+    //         if (err || !stats.isFile()) {
+    //             // SPA fallback: serve index.html for non-API routes
+    //             fs.readFile(INDEX_FILE, (readErr, data) => {
+    //                 if (readErr) {
+    //                     res.writeHead(404, { 'Content-Type': 'text/plain' });
+    //                     res.end('404 Not Found');
+    //                     return;
+    //                 }
+    //                 res.writeHead(200, { 'Content-Type': 'text/html' });
+    //                 res.end(data);
+    //             });
+    //             return;
+    //         }
+    //         const ext = path.extname(filePath).toLowerCase();
+    //         const mimeTypes = {
+    //             '.html': 'text/html',
+    //             '.js': 'application/javascript',
+    //             '.css': 'text/css',
+    //             '.svg': 'image/svg+xml',
+    //             '.json': 'application/json',
+    //             '.png': 'image/png',
+    //             '.jpg': 'image/jpeg',
+    //             '.ico': 'image/x-icon',
+    //         };
+    //         res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' });
+    //         fs.createReadStream(filePath).pipe(res);
+    //     });
+    // });
+    // console.log('Running in production mode: static files served from dist/.');
 }
 
 const wss = new WebSocketServer({ server });
