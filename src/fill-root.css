@@ -1,0 +1,19 @@
+body,
+#root {
+    width: 100vw;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+}
+
+/* Optional: ensure all children use border-box for sizing */
+*,
+*::before,
+*::after {
+    box-sizing: inherit;
+}

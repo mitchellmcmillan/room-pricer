@@ -1,0 +1,39 @@
+#root {
+  min-height: 100vh;
+}
+
+.panel {
+  transition: all 550ms ease;
+}
+
+.list-row {
+  animation: fadeGrow 500ms ease;
+  transform-origin: top;
+}
+
+.list-row.removing {
+  animation: fadeShrink 250ms ease forwards;
+}
+
+@keyframes fadeGrow {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes fadeShrink {
+  from {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.92);
+  }
+}
