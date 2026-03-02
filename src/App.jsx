@@ -696,7 +696,7 @@ function VisualiserRoute() {
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       <Routes>
         <Route path="/" element={<Landing onJoin={() => { }} onCreate={() => { }} onVisualise={() => { }} />} />
         <Route path="/auction/:key" element={<AuctionRoute />} />
