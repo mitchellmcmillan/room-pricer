@@ -11,6 +11,7 @@
     "start": "node auction-server.js",
     "auction-dev": "env NODE_ENV=development node auction-server.js",
     "auction-prod": "env NODE_ENV=production node auction-server.js",
+    "package:api": "rm -rf release && mkdir -p release && zip -r release/room-pricer-api.zip auction-server.js package.json package-lock.json README.md wordlists",
     "deploy": "gh-pages -d dist"
   },
   "dependencies": {
