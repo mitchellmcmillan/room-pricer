@@ -97,7 +97,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     if (data.auctionPaused) {
                         setReady(false);
                         setAuctionCountdownEndTime(null);
-                        setActionError("Auction paused because a bidder disconnected. Reconnect and mark ready to resume.");
+                        setActionError(null);
                     } else if (data.auctionStartTime) {
                         setActionError(null);
                     }
@@ -116,7 +116,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     setAuctionStarted(false);
                     setAuctionCountdownEndTime(null);
                     setReady(false);
-                    setActionError(data.message || "Auction paused because a bidder disconnected. Reconnect and mark ready to resume.");
+                    setActionError(null);
                 } else if (data.type === "auction_end") {
                     setAuctionEnded(true);
                     setActionError("Auction ended. Join or create a new auction to continue.");

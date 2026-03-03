@@ -1051,6 +1051,8 @@ function releasePerson(auction, personIdx) {
         clearTimeout(auction.auctionCountdownTimeout);
         auction.auctionCountdownTimeout = null;
         auction.auctionCountdownEndTime = null;
+        // If countdown is interrupted (e.g. bidder disconnects), everyone must ready again.
+        auction.readyPeople = [];
     }
     return true;
 }
