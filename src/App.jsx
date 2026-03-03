@@ -4,7 +4,7 @@ import './fill-root.css';
 import NetworkAuction from './NetworkAuction';
 import RoomLogVisualiser from './RoomLogVisualiser';
 import {
-  BrowserRouter,
+  HashRouter,
   Routes,
   Route,
   useNavigate,
@@ -696,7 +696,7 @@ function VisualiserRoute() {
 
 function App() {
   return (
-    <BrowserRouter basename={import.meta.env.BASE_URL}>
+    <HashRouter>
       <Routes>
         <Route path="/" element={<Landing onJoin={() => { }} onCreate={() => { }} onVisualise={() => { }} />} />
         <Route path="/auction/:key" element={<AuctionRoute />} />
@@ -704,7 +704,7 @@ function App() {
         <Route path="/visualiser" element={<VisualiserRoute />} />
         <Route path="*" element={<Landing onJoin={() => { }} onCreate={() => { }} onVisualise={() => { }} />} />
       </Routes>
-    </BrowserRouter>
+    </HashRouter>
   );
 }
 

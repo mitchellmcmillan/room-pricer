@@ -254,7 +254,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
 
     async function handleCopyAuctionLink() {
         if (!auctionId) return;
-        const url = `${window.location.origin}/auction/${auctionId}`;
+        const url = `${window.location.origin}${window.location.pathname}#/auction/${auctionId}`;
         try {
             await navigator.clipboard.writeText(url);
         } catch {
