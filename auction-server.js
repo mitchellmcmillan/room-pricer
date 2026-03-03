@@ -108,6 +108,8 @@ function createAuctionState(id, config) {
         auctionStartTime: null,
         smoothProgress: 0,
         timer: 0,
+        paused: false,
+        pauseReason: null,
         auctionDbId: null,
         chosenPeople: [],
         readyPeople: [],
@@ -152,6 +154,9 @@ function scheduleIdleCloseIfEmpty(auction) {
     auction.idleCloseTimeout = setTimeout(() => {
         auction.idleCloseTimeout = null;
         if (auction.ended || auction.clients.size > 0) return;
+        const timedOutAuctionId = auction.id;
+        const timedOutExternalId = auction.externalId || auction.id;
+        const wasDefaultAuction = defaultAuctionId === timedOutAuctionId;
         auction.ended = true;
         cancelIdleCloseTimer(auction);
         if (auction.tickTimeout) clearTimeout(auction.tickTimeout);
@@ -161,7 +166,21 @@ function scheduleIdleCloseIfEmpty(auction) {
         auction.auctionCountdownEndTime = null;
         auction.readyPeople = [];
         broadcast(auction, { type: 'auction_end', reason: 'inactivity_timeout' });
-        console.log(`[AUCTION] ${auction.externalId || auction.id} ended after 1 hour with no connected bidders.`);
+        auctions.delete(timedOutAuctionId);
+        if (wasDefaultAuction) {
+            const hasRoster = peopleRecords.length > 0 && roomRecords.length > 0;
+            if (hasRoster) {
+                const replacement = createAuctionFromBase();
+                defaultAuctionId = replacement.id;
+                defaultAuctionPublicId = replacement.externalId;
+                console.log(`[AUCTION] Replaced timed-out default auction ${timedOutExternalId} with ${replacement.externalId} (${replacement.id}).`);
+            } else {
+                defaultAuctionId = null;
+                defaultAuctionPublicId = null;
+                console.log(`[AUCTION] Default auction ${timedOutExternalId} removed after inactivity; no roster available for replacement.`);
+            }
+        }
+        console.log(`[AUCTION] ${timedOutExternalId} ended and was deleted after 1 hour with no connected bidders.`);
     }, AUCTION_IDLE_CLOSE_TIMEOUT_MS);
 }
 
@@ -300,6 +319,8 @@ function sendAuctionState(auction, extra = {}) {
         roomSelections: auction.roomSelections,
         smoothProgress: auction.smoothProgress,
         auctionStartTime: auction.auctionStartTime,
+        auctionPaused: !!auction.paused,
+        auctionPauseReason: auction.pauseReason || null,
         timer: auction.timer,
         serverTime: Date.now(),
         chosenPeople: auction.chosenPeople,
@@ -1034,6 +1055,30 @@ function releasePerson(auction, personIdx) {
     return true;
 }
 
+function pauseAuctionOnBidderDisconnect(auction) {
+    if (!auction || auction.ended || !auction.auctionStartTime) return false;
+    if (auction.tickTimeout) {
+        clearTimeout(auction.tickTimeout);
+        auction.tickTimeout = null;
+    }
+    if (auction.auctionCountdownTimeout) {
+        clearTimeout(auction.auctionCountdownTimeout);
+        auction.auctionCountdownTimeout = null;
+    }
+    auction.auctionCountdownEndTime = null;
+    auction.auctionStartTime = null;
+    auction.paused = true;
+    auction.pauseReason = 'bidder_disconnected';
+    auction.readyPeople = [];
+    broadcast(auction, {
+        type: 'auction_paused',
+        reason: 'bidder_disconnected',
+        message: 'Auction paused because a bidder disconnected. Reconnect and mark ready to resume.'
+    });
+    sendAuctionState(auction);
+    return true;
+}
+
 function cleanupIpHistory(now) {
     for (const [ip, timestamps] of ipConnectionHistory.entries()) {
         const recent = timestamps.filter(ts => now - ts < IP_HISTORY_TTL_MS);
@@ -1089,8 +1134,13 @@ async function handleStartAuction(auction) {
     if (auction.ended) return false;
     if (auction.auctionStartTime) return false;
     if (auction.allocationLocked) return false;
+    const resumingPausedAuction = !!auction.paused;
     auction.auctionStartTime = Date.now();
-    auction.timer = 0;
+    if (!resumingPausedAuction) {
+        auction.timer = 0;
+    }
+    auction.paused = false;
+    auction.pauseReason = null;
     maybeLockAllocation(auction);
     await ensureAuctionRecord(auction, auction.auctionStartTime);
     console.log(`[AUCTION] Auction ${auction.id} started, scheduling first tick.`);
@@ -1137,8 +1187,13 @@ function handleReadyUpdate(auction, ws, data) {
             countdownEndTime: auction.auctionCountdownEndTime
         });
         auction.auctionCountdownTimeout = setTimeout(async () => {
+            const resumingPausedAuction = !!auction.paused;
             auction.auctionStartTime = Date.now();
-            auction.timer = 0;
+            if (!resumingPausedAuction) {
+                auction.timer = 0;
+            }
+            auction.paused = false;
+            auction.pauseReason = null;
             maybeLockAllocation(auction);
             await ensureAuctionRecord(auction, auction.auctionStartTime);
             auction.auctionCountdownEndTime = null;
@@ -1239,7 +1294,9 @@ wss.on('connection', (ws, req) => {
         ws.close();
         return;
     }
-    if (auction.chosenPeople.length >= auction.people.length) {
+    const ownedPeople = new Set(auction.clientPersonMap.values());
+    const hasReclaimableSeat = auction.chosenPeople.some(idx => !ownedPeople.has(idx));
+    if (auction.chosenPeople.length >= auction.people.length && !hasReclaimableSeat) {
         ws.send(JSON.stringify({ type: 'error', message: 'Auction is full.' }));
         ws.close();
         return;
@@ -1333,15 +1390,19 @@ wss.on('connection', (ws, req) => {
         auction.pendingJoinTimers.delete(ws);
         const personIdx = auction.clientPersonMap.get(ws);
         if (typeof personIdx === 'number') {
-            releasePerson(auction, personIdx);
             auction.clientPersonMap.delete(ws);
-            broadcast(auction, {
-                type: 'ready_update',
-                readyPeople: auction.readyPeople,
-                chosenPeople: auction.chosenPeople,
-                ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
-            });
-            sendAuctionState(auction);
+            if (auction.auctionStartTime) {
+                pauseAuctionOnBidderDisconnect(auction);
+            } else {
+                releasePerson(auction, personIdx);
+                broadcast(auction, {
+                    type: 'ready_update',
+                    readyPeople: auction.readyPeople,
+                    chosenPeople: auction.chosenPeople,
+                    ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+                });
+                sendAuctionState(auction);
+            }
         }
         if (auction.clients.size === 0) {
             scheduleIdleCloseIfEmpty(auction);
@@ -1355,6 +1416,8 @@ wss.on('connection', (ws, req) => {
         roomSelections: auction.roomSelections,
         smoothProgress: auction.smoothProgress,
         auctionStartTime: auction.auctionStartTime,
+        auctionPaused: !!auction.paused,
+        auctionPauseReason: auction.pauseReason || null,
         timer: auction.timer,
         chosenPeople: auction.chosenPeople,
         readyPeople: auction.readyPeople,

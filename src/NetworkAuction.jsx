@@ -28,6 +28,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
     const [ready, setReady] = useState(false);
     const [readyPeople, setReadyPeople] = useState([]);
     const [auctionCountdownEndTime, setAuctionCountdownEndTime] = useState(null);
+    const [auctionPaused, setAuctionPaused] = useState(false);
     const [auctionStarted, _setAuctionStarted] = useState(false);
     const setAuctionStarted = (val) => _setAuctionStarted(val);
     const reconnectTimeoutRef = useRef(null);
@@ -82,6 +83,8 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     setRoomSelections(nextSelections);
                     setSmoothProgress(data.smoothProgress);
                     setAuctionStartTime(data.auctionStartTime);
+                    setAuctionStarted(!!data.auctionStartTime);
+                    setAuctionPaused(!!data.auctionPaused);
                     setTimer(data.timer);
                     setNextTickChanges(nextSelections.map(arr => (arr.length - 1) * (typeof data.tickAmount === "number" ? data.tickAmount : tickAmount)));
                     setAllocationFound(
@@ -91,6 +94,13 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     );
                     setAuctionEnded(false);
                     setChosenPeople(data.chosenPeople || []);
+                    if (data.auctionPaused) {
+                        setReady(false);
+                        setAuctionCountdownEndTime(null);
+                        setActionError("Auction paused because a bidder disconnected. Reconnect and mark ready to resume.");
+                    } else if (data.auctionStartTime) {
+                        setActionError(null);
+                    }
                 } else if (data.type === "ready_update") {
                     if (Array.isArray(data.people)) setPeople(data.people);
                     if (Array.isArray(data.roomNames)) setRoomNames(data.roomNames);
@@ -101,6 +111,12 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     setChosenPeople(data.chosenPeople || []);
                 } else if (data.type === "auction_countdown") {
                     setAuctionCountdownEndTime(data.countdownEndTime);
+                } else if (data.type === "auction_paused") {
+                    setAuctionPaused(true);
+                    setAuctionStarted(false);
+                    setAuctionCountdownEndTime(null);
+                    setReady(false);
+                    setActionError(data.message || "Auction paused because a bidder disconnected. Reconnect and mark ready to resume.");
                 } else if (data.type === "auction_end") {
                     setAuctionEnded(true);
                     setActionError("Auction ended. Join or create a new auction to continue.");
@@ -201,6 +217,23 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
             setUserRoom(null);
         }
     }, [people, roomNames, selectedPerson, userRoom]);
+
+    useEffect(() => {
+        if (selectedPerson === null) {
+            setUserRoom(null);
+            return;
+        }
+        const roomIdx = roomSelections.findIndex(selection => selection.includes(selectedPerson));
+        setUserRoom(roomIdx >= 0 ? roomIdx : null);
+    }, [selectedPerson, roomSelections]);
+
+    useEffect(() => {
+        if (selectedPerson === null) {
+            setReady(false);
+            return;
+        }
+        setReady(readyPeople.includes(selectedPerson));
+    }, [readyPeople, selectedPerson]);
 
     useEffect(() => {
         if (!auctionCountdownEndTime) return;
@@ -378,6 +411,11 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                 {auctionEnded && (
                     <div style={{ color: 'green', marginBottom: '1em', textAlign: 'center' }} role="status">
                         Auction has ended. Thank you for participating!
+                    </div>
+                )}
+                {auctionPaused && !auctionEnded && (
+                    <div style={{ color: '#8a4b00', marginBottom: '1em', textAlign: 'center', fontWeight: 700 }} role="status">
+                        Auction paused. All bidders must be ready to resume.
                     </div>
                 )}
                 {showCountdown && (
