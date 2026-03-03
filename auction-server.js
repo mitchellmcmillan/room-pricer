@@ -16,6 +16,7 @@ const DB_PATH = path.join(LOG_DIR, 'auction-log.sqlite');
 
 const DEFAULT_TICK_INTERVAL_MS = 10000;
 const DEFAULT_TICK_AMOUNT = 1;
+const AUCTION_READY_COUNTDOWN_MS = 5000;
 const WORD_LIST_LOCAL = path.resolve('wordlists/english-lowercase.txt');
 const WORD_LIST_PATHS = [
     WORD_LIST_LOCAL,
@@ -117,6 +118,7 @@ function createAuctionState(id, config) {
         idleCloseTimeout: null,
         auctionCountdownTimeout: null,
         auctionCountdownEndTime: null,
+        auctionCountdownRemainingMs: null,
         tickTimeout: null,
         peopleRecords: config.peopleRecords,
         roomRecords: config.roomRecords,
@@ -160,10 +162,8 @@ function scheduleIdleCloseIfEmpty(auction) {
         auction.ended = true;
         cancelIdleCloseTimer(auction);
         if (auction.tickTimeout) clearTimeout(auction.tickTimeout);
-        if (auction.auctionCountdownTimeout) clearTimeout(auction.auctionCountdownTimeout);
         auction.tickTimeout = null;
-        auction.auctionCountdownTimeout = null;
-        auction.auctionCountdownEndTime = null;
+        cancelAuctionCountdown(auction);
         auction.readyPeople = [];
         broadcast(auction, { type: 'auction_end', reason: 'inactivity_timeout' });
         auctions.delete(timedOutAuctionId);
@@ -290,8 +290,8 @@ function withConfigPayload(auction, data = {}) {
         ...data,
         ...auctionPayload(auction)
     };
-    if (auction.auctionCountdownEndTime && !auction.auctionStartTime) {
-        payload.auctionCountdownEndTime = auction.auctionCountdownEndTime;
+    if (!auction.auctionStartTime) {
+        payload.auctionCountdownEndTime = auction.auctionCountdownEndTime || null;
     }
     return payload;
 }
@@ -301,8 +301,8 @@ function broadcast(auction, data) {
         ...data,
         ...auctionPayload(auction)
     };
-    if (auction.auctionCountdownEndTime && !auction.auctionStartTime) {
-        payload.auctionCountdownEndTime = auction.auctionCountdownEndTime;
+    if (!auction.auctionStartTime) {
+        payload.auctionCountdownEndTime = auction.auctionCountdownEndTime || null;
     }
     const msg = JSON.stringify(payload);
     auction.clients.forEach(client => {
@@ -327,6 +327,57 @@ function sendAuctionState(auction, extra = {}) {
         readyPeople: auction.readyPeople,
         ...extra
     });
+}
+
+function cancelAuctionCountdown(auction) {
+    if (!auction) return;
+    if (auction.auctionCountdownTimeout) {
+        clearTimeout(auction.auctionCountdownTimeout);
+        auction.auctionCountdownTimeout = null;
+    }
+    auction.auctionCountdownEndTime = null;
+    auction.auctionCountdownRemainingMs = null;
+}
+
+function pauseAuctionCountdown(auction) {
+    if (!auction || !auction.auctionCountdownEndTime || auction.auctionStartTime) return false;
+    const msLeft = Math.max(0, auction.auctionCountdownEndTime - Date.now());
+    if (auction.auctionCountdownTimeout) {
+        clearTimeout(auction.auctionCountdownTimeout);
+        auction.auctionCountdownTimeout = null;
+    }
+    auction.auctionCountdownEndTime = null;
+    auction.auctionCountdownRemainingMs = msLeft;
+    return true;
+}
+
+function startReadyCountdown(auction, durationMs = AUCTION_READY_COUNTDOWN_MS) {
+    const countdownMs = Math.max(1, Math.floor(durationMs));
+    if (auction.auctionCountdownTimeout) {
+        clearTimeout(auction.auctionCountdownTimeout);
+    }
+    auction.auctionCountdownEndTime = Date.now() + countdownMs;
+    auction.auctionCountdownRemainingMs = null;
+    broadcast(auction, {
+        type: 'auction_countdown',
+        countdownEndTime: auction.auctionCountdownEndTime
+    });
+    auction.auctionCountdownTimeout = setTimeout(async () => {
+        auction.auctionCountdownTimeout = null;
+        const resumingPausedAuction = !!auction.paused;
+        auction.auctionStartTime = Date.now();
+        if (!resumingPausedAuction) {
+            auction.timer = 0;
+        }
+        auction.paused = false;
+        auction.pauseReason = null;
+        maybeLockAllocation(auction);
+        await ensureAuctionRecord(auction, auction.auctionStartTime);
+        auction.auctionCountdownEndTime = null;
+        auction.auctionCountdownRemainingMs = null;
+        scheduleNextTick(auction);
+        sendAuctionState(auction);
+    }, countdownMs);
 }
 
 async function handleApi(req, res) {
@@ -415,10 +466,8 @@ async function handleApi(req, res) {
                 auction.ended = true;
                 cancelIdleCloseTimer(auction);
                 if (auction.tickTimeout) clearTimeout(auction.tickTimeout);
-                if (auction.auctionCountdownTimeout) clearTimeout(auction.auctionCountdownTimeout);
                 auction.tickTimeout = null;
-                auction.auctionCountdownTimeout = null;
-                auction.auctionCountdownEndTime = null;
+                cancelAuctionCountdown(auction);
             });
             auctions.clear();
             await loadConfigFromDatabase({ resetDefaultAuction: true });
@@ -547,8 +596,7 @@ async function handleApi(req, res) {
         }
         auction.ended = true;
         if (auction.tickTimeout) clearTimeout(auction.tickTimeout);
-        if (auction.auctionCountdownTimeout) clearTimeout(auction.auctionCountdownTimeout);
-        auction.auctionCountdownEndTime = null;
+        cancelAuctionCountdown(auction);
         broadcast(auction, { type: 'auction_end' });
         auction.readyPeople = [];
         auction.clients.forEach(client => client.close());
@@ -1047,13 +1095,7 @@ function releasePerson(auction, personIdx) {
     auction.chosenPeople = auction.chosenPeople.filter(idx => idx !== personIdx);
     auction.roomSelections = auction.roomSelections.map(arr => arr.filter(i => i !== personIdx));
     auction.readyPeople = auction.readyPeople.filter(idx => idx !== personIdx);
-    if (auction.auctionCountdownTimeout) {
-        clearTimeout(auction.auctionCountdownTimeout);
-        auction.auctionCountdownTimeout = null;
-        auction.auctionCountdownEndTime = null;
-        // If countdown is interrupted (e.g. bidder disconnects), everyone must ready again.
-        auction.readyPeople = [];
-    }
+    pauseAuctionCountdown(auction);
     return true;
 }
 
@@ -1063,11 +1105,7 @@ function pauseAuctionOnBidderDisconnect(auction) {
         clearTimeout(auction.tickTimeout);
         auction.tickTimeout = null;
     }
-    if (auction.auctionCountdownTimeout) {
-        clearTimeout(auction.auctionCountdownTimeout);
-        auction.auctionCountdownTimeout = null;
-    }
-    auction.auctionCountdownEndTime = null;
+    cancelAuctionCountdown(auction);
     auction.auctionStartTime = null;
     auction.paused = true;
     auction.pauseReason = 'bidder_disconnected';
@@ -1136,6 +1174,7 @@ async function handleStartAuction(auction) {
     if (auction.ended) return false;
     if (auction.auctionStartTime) return false;
     if (auction.allocationLocked) return false;
+    cancelAuctionCountdown(auction);
     const resumingPausedAuction = !!auction.paused;
     auction.auctionStartTime = Date.now();
     if (!resumingPausedAuction) {
@@ -1170,10 +1209,8 @@ function handleReadyUpdate(auction, ws, data) {
     auction.readyPeople = auction.readyPeople.filter(idx => idx !== data.personIdx);
     if (data.ready) {
         auction.readyPeople.push(data.personIdx);
-    } else if (auction.auctionCountdownTimeout) {
-        clearTimeout(auction.auctionCountdownTimeout);
-        auction.auctionCountdownTimeout = null;
-        auction.auctionCountdownEndTime = null;
+    } else if (auction.auctionCountdownTimeout || auction.auctionCountdownRemainingMs !== null) {
+        cancelAuctionCountdown(auction);
     }
     broadcast(auction, {
         type: 'ready_update',
@@ -1183,25 +1220,8 @@ function handleReadyUpdate(auction, ws, data) {
     });
     const allClaimed = auction.chosenPeople.length === auction.people.length;
     if (auction.readyPeople.length === auction.people.length && auction.people.length > 0 && allClaimed && !auction.auctionCountdownEndTime && !auction.auctionStartTime && !auction.allocationLocked) {
-        auction.auctionCountdownEndTime = Date.now() + 5000;
-        broadcast(auction, {
-            type: 'auction_countdown',
-            countdownEndTime: auction.auctionCountdownEndTime
-        });
-        auction.auctionCountdownTimeout = setTimeout(async () => {
-            const resumingPausedAuction = !!auction.paused;
-            auction.auctionStartTime = Date.now();
-            if (!resumingPausedAuction) {
-                auction.timer = 0;
-            }
-            auction.paused = false;
-            auction.pauseReason = null;
-            maybeLockAllocation(auction);
-            await ensureAuctionRecord(auction, auction.auctionStartTime);
-            auction.auctionCountdownEndTime = null;
-            scheduleNextTick(auction);
-            sendAuctionState(auction);
-        }, 5000);
+        const countdownMs = auction.auctionCountdownRemainingMs ?? AUCTION_READY_COUNTDOWN_MS;
+        startReadyCountdown(auction, countdownMs);
     }
     return true;
 }
@@ -1233,8 +1253,7 @@ function shutdown() {
         auction.ended = true;
         cancelIdleCloseTimer(auction);
         if (auction.tickTimeout) clearTimeout(auction.tickTimeout);
-        if (auction.auctionCountdownTimeout) clearTimeout(auction.auctionCountdownTimeout);
-        auction.auctionCountdownEndTime = null;
+        cancelAuctionCountdown(auction);
         broadcast(auction, { type: 'auction_end', reason: 'shutdown' });
     });
     // Close servers

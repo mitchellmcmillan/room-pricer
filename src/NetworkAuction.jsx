@@ -68,9 +68,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
             setLoading(false);
             try {
                 const data = JSON.parse(event.data);
-                if (data.auctionCountdownEndTime) {
-                    setAuctionCountdownEndTime(data.auctionCountdownEndTime);
-                }
+                const hasCountdownField = Object.prototype.hasOwnProperty.call(data, "auctionCountdownEndTime");
                 if (data.type === "auction_update") {
                     if (Array.isArray(data.people)) setPeople(data.people);
                     if (Array.isArray(data.roomNames)) setRoomNames(data.roomNames);
@@ -94,6 +92,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     );
                     setAuctionEnded(false);
                     setChosenPeople(data.chosenPeople || []);
+                    setAuctionCountdownEndTime(hasCountdownField ? data.auctionCountdownEndTime : null);
                     if (data.auctionPaused) {
                         setReady(false);
                         setAuctionCountdownEndTime(null);
@@ -109,6 +108,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     if (typeof data.tickAmount === "number") setTickAmount(data.tickAmount);
                     setReadyPeople(data.readyPeople || []);
                     setChosenPeople(data.chosenPeople || []);
+                    setAuctionCountdownEndTime(hasCountdownField ? data.auctionCountdownEndTime : null);
                 } else if (data.type === "auction_countdown") {
                     setAuctionCountdownEndTime(data.countdownEndTime);
                 } else if (data.type === "auction_paused") {
