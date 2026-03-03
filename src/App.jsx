@@ -113,7 +113,7 @@ function Landing({ onJoin, onCreate, onVisualise }) {
   }, [showJoinError, joinErrorText]);
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24, color: '#000', padding: 24 }}>
-      <h1 style={{ marginBottom: 8 }}>Room Auction</h1>
+      <h1 style={{ marginBottom: 8 }}>Room Auction 🏠</h1>
       <h4 style={{ marginTop: 0, color: '#666' }}>N-way bidirectional Dutch auctions to settle your sharehouse debate!</h4>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16, width: '100%', maxWidth: 760 }}>
         <div style={{ padding: 16, border: '1px solid #e0e6ed', borderRadius: 12, boxShadow: '0 4px 12px #0000000c', background: '#f9fbff' }}>
