@@ -1390,18 +1390,20 @@ wss.on('connection', (ws, req) => {
         auction.pendingJoinTimers.delete(ws);
         const personIdx = auction.clientPersonMap.get(ws);
         if (typeof personIdx === 'number') {
+            const wasStarted = !!auction.auctionStartTime;
             auction.clientPersonMap.delete(ws);
-            if (auction.auctionStartTime) {
-                pauseAuctionOnBidderDisconnect(auction);
-            } else {
-                releasePerson(auction, personIdx);
+            if (releasePerson(auction, personIdx)) {
                 broadcast(auction, {
                     type: 'ready_update',
                     readyPeople: auction.readyPeople,
                     chosenPeople: auction.chosenPeople,
                     ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
                 });
-                sendAuctionState(auction);
+                if (wasStarted) {
+                    pauseAuctionOnBidderDisconnect(auction);
+                } else {
+                    sendAuctionState(auction);
+                }
             }
         }
         if (auction.clients.size === 0) {
