@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 import { applyAuctionCommand, createAuctionEngineState } from './auction/engine.js';
 import { validateRoomAuctionRoster } from './auction/roster.js';
 import { buildClientAuctionSnapshot } from './auction/snapshot.js';
+import { buildLogCsv as buildLogCsvFromLog, createSqliteAuctionPersistence } from './auction/sqlite-persistence.js';
 
 const PORT = 8080;
 const DIST_DIR = path.resolve('dist');
@@ -41,6 +42,7 @@ let baseConfig = null;
 const auctions = new Map(); // auctionId -> auction state
 const connectionAuctionMap = new Map(); // ws -> auctionId
 let db = null;
+let auctionPersistence = null;
 let defaultAuctionId = null; // internal id
 let defaultAuctionPublicId = null; // three-word key
 const PENDING_JOIN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -525,24 +527,8 @@ async function handleApi(req, res) {
                 sendJson(res, 400, { error: rosterValidation.error.message, code: rosterValidation.error.code });
                 return true;
             }
-            const database = await initDatabase();
-            const tx = database.transaction(() => {
-                // Clear dependent historical data first to satisfy FK constraints
-                // before replacing the roster.
-                database.exec(`
-                    DELETE FROM tick_room_people;
-                    DELETE FROM tick_room_states;
-                    DELETE FROM tick_logs;
-                    DELETE FROM auctions;
-                    DELETE FROM people;
-                    DELETE FROM rooms;
-                `);
-                const insertPerson = database.prepare('INSERT INTO people (name, emoji, personOrder) VALUES (?, ?, ?)');
-                incomingPeople.forEach((p, idx) => insertPerson.run(p.name || '', p.emoji || '', idx));
-                const insertRoom = database.prepare('INSERT INTO rooms (name, description, initialPrice, roomOrder) VALUES (?, ?, ?, ?)');
-                incomingRooms.forEach((r, idx) => insertRoom.run(r.name || '', r.description || '', Number(r.initialPrice) || 0, idx));
-            });
-            tx();
+            await initDatabase();
+            auctionPersistence.saveRoster({ people: incomingPeople, rooms: incomingRooms });
             // Stop any live auctions before replacing base config.
             auctions.forEach((auction) => {
                 auction.ended = true;
@@ -723,7 +709,7 @@ async function handleApi(req, res) {
             res.setHeader('X-Auction-Db-Id', resolved.auctionDbId);
             const format = url.searchParams.get('format') || 'json';
             if (format === 'csv') {
-                const csv = buildLogCsv(logData);
+                const csv = buildLogCsvFromLog(logData);
                 res.writeHead(200, { 'Content-Type': 'text/csv' });
                 res.end(csv);
             } else {
@@ -813,121 +799,24 @@ async function ensureLogDir() {
     }
 }
 
-function seedDefaults(database) {
-    const settings = database.prepare('SELECT key, value FROM settings').all().reduce((acc, row) => {
-        acc[row.key] = row.value;
-        return acc;
-    }, {});
-    if (!settings.tickIntervalMs) {
-        database.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('tickIntervalMs', String(DEFAULT_TICK_INTERVAL_MS));
-    }
-    if (!settings.tickAmount) {
-        database.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('tickAmount', String(DEFAULT_TICK_AMOUNT));
-    }
-}
-
-function ensureTickSchema(database) {
-    const info = database.prepare('PRAGMA table_info(tick_logs)').all();
-    const hasJsonCols = info.some(col => col.name === 'prices' || col.name === 'selections');
-    const desiredColumns = ['id', 'auctionId', 'tickTime', 'timer'];
-    const schemaMismatch = info.length > 0 && (
-        info.some(col => !desiredColumns.includes(col.name)) ||
-        desiredColumns.some(col => !info.some(c => c.name === col))
-    );
-    const shouldRebuild = info.length === 0 || hasJsonCols || schemaMismatch;
-    if (shouldRebuild) {
-        console.warn('[DB] Migrating tick logging schema to normalized tables (dropping old tick data).');
-        database.exec(`
-            DROP TABLE IF EXISTS tick_room_people;
-            DROP TABLE IF EXISTS tick_room_states;
-            DROP TABLE IF EXISTS tick_logs;
-            DROP INDEX IF EXISTS idx_tick_logs_auction;
-            DROP INDEX IF EXISTS idx_tick_room_states_tick;
-            DROP INDEX IF EXISTS idx_tick_room_people_state;
-        `);
-    }
-    database.exec(`
-        CREATE TABLE IF NOT EXISTS tick_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            auctionId TEXT NOT NULL,
-            tickTime TEXT NOT NULL,
-            timer INTEGER,
-            FOREIGN KEY (auctionId) REFERENCES auctions(id)
-        );
-        CREATE TABLE IF NOT EXISTS tick_room_states (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tickId INTEGER NOT NULL,
-            roomId INTEGER NOT NULL,
-            price INTEGER NOT NULL,
-            FOREIGN KEY (tickId) REFERENCES tick_logs(id),
-            FOREIGN KEY (roomId) REFERENCES rooms(id)
-        );
-        CREATE TABLE IF NOT EXISTS tick_room_people (
-            tickRoomStateId INTEGER NOT NULL,
-            personId INTEGER NOT NULL,
-            FOREIGN KEY (tickRoomStateId) REFERENCES tick_room_states(id),
-            FOREIGN KEY (personId) REFERENCES people(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_tick_logs_auction ON tick_logs(auctionId);
-        CREATE INDEX IF NOT EXISTS idx_tick_room_states_tick ON tick_room_states(tickId);
-        CREATE INDEX IF NOT EXISTS idx_tick_room_people_state ON tick_room_people(tickRoomStateId);
-    `);
-}
-
-function ensureAuctionSchema(database) {
-    const info = database.prepare('PRAGMA table_info(auctions)').all();
-    const hasExternalId = info.some(col => col.name === 'externalId');
-    if (!hasExternalId) {
-        console.warn('[DB] Adding externalId column to auctions table.');
-        database.exec('ALTER TABLE auctions ADD COLUMN externalId TEXT;');
-    }
-    database.exec('UPDATE auctions SET externalId = id WHERE externalId IS NULL;');
-    database.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_auctions_external_id ON auctions(externalId);');
-}
-
 async function initDatabase() {
     if (db) return db;
     await ensureLogDir();
     db = new Database(DB_PATH);
-    db.pragma('foreign_keys = ON');
-    db.pragma('journal_mode = WAL');
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS people (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            emoji TEXT NOT NULL,
-            personOrder INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS rooms (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL,
-            initialPrice INTEGER NOT NULL,
-            roomOrder INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS auctions (
-            id TEXT PRIMARY KEY,
-            externalId TEXT,
-            startedAt TEXT NOT NULL
-        );
-    `);
-    ensureAuctionSchema(db);
-    ensureTickSchema(db);
-    seedDefaults(db);
+    auctionPersistence = createSqliteAuctionPersistence(db, {
+        tickIntervalMs: DEFAULT_TICK_INTERVAL_MS,
+        tickAmount: DEFAULT_TICK_AMOUNT
+    });
+    auctionPersistence.initialize();
     return db;
 }
 
 async function loadConfigFromDatabase(options = {}) {
     const { resetDefaultAuction = false } = options;
-    const database = await initDatabase();
-    const peopleRows = database.prepare('SELECT id, name, emoji FROM people ORDER BY personOrder ASC').all();
-    const roomRows = database.prepare('SELECT id, name, description, initialPrice FROM rooms ORDER BY roomOrder ASC').all();
-    const tickIntervalRow = database.prepare('SELECT value FROM settings WHERE key = ?').get('tickIntervalMs');
-    const tickAmountRow = database.prepare('SELECT value FROM settings WHERE key = ?').get('tickAmount');
+    await initDatabase();
+    const roster = auctionPersistence.readRoster();
+    const peopleRows = roster.people;
+    const roomRows = roster.rooms;
 
     peopleRecords = peopleRows;
     roomRecords = roomRows;
@@ -935,8 +824,8 @@ async function loadConfigFromDatabase(options = {}) {
     roomNames = roomRows.map(r => r.name);
     roomDescriptions = roomRows.map(r => r.description || '');
     initialPrices = roomRows.map(r => r.initialPrice);
-    const parsedInterval = Number(tickIntervalRow?.value ?? DEFAULT_TICK_INTERVAL_MS);
-    const parsedTickAmount = Number(tickAmountRow?.value ?? DEFAULT_TICK_AMOUNT);
+    const parsedInterval = Number(roster.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS);
+    const parsedTickAmount = Number(roster.tickAmount ?? DEFAULT_TICK_AMOUNT);
     tickIntervalMs = Number.isFinite(parsedInterval) ? parsedInterval : DEFAULT_TICK_INTERVAL_MS;
     tickAmount = Number.isFinite(parsedTickAmount) ? parsedTickAmount : DEFAULT_TICK_AMOUNT;
 
@@ -967,67 +856,41 @@ async function loadConfigFromDatabase(options = {}) {
 }
 
 async function ensureAuctionRecord(auction, startTimeMs) {
-    const database = await initDatabase();
+    await initDatabase();
     const externalId = auction.externalId || auction.id;
-    // Use a stable DB id per public auction key. If a legacy row already exists
-    // for this externalId, reuse its id to keep FK relationships valid.
     if (!auction.auctionDbId) {
-        const existing = database.prepare('SELECT id FROM auctions WHERE externalId = ? LIMIT 1').get(externalId);
-        auction.auctionDbId = existing?.id || externalId;
+        const existing = auctionPersistence.resolveAuctionDbId(externalId);
+        auction.auctionDbId = existing?.auctionDbId || externalId;
     }
-    const startedAtIso = startTimeMs ? new Date(startTimeMs).toISOString() : new Date().toISOString();
-    database.prepare('INSERT OR IGNORE INTO auctions (id, externalId, startedAt) VALUES (?, ?, ?)').run(auction.auctionDbId, externalId, startedAtIso);
-    database.prepare('UPDATE auctions SET externalId = ? WHERE id = ?').run(externalId, auction.auctionDbId);
-    return database;
+    auctionPersistence.ensureAuctionRecord({ auctionDbId: auction.auctionDbId, externalId, startedAtMs: startTimeMs });
+    return db;
 }
 
 async function logTick(auction) {
     try {
         await ensureLogDir();
-        const database = await ensureAuctionRecord(auction, auction.auctionStartTime);
-        const insertTick = database.prepare(`
-            INSERT INTO tick_logs (auctionId, tickTime, timer)
-            VALUES (@auctionId, @tickTime, @timer)
-        `);
-        const insertRoomState = database.prepare(`
-            INSERT INTO tick_room_states (tickId, roomId, price)
-            VALUES (@tickId, @roomId, @price)
-        `);
-        const insertRoomPerson = database.prepare(`
-            INSERT INTO tick_room_people (tickRoomStateId, personId)
-            VALUES (@tickRoomStateId, @personId)
-        `);
-        const tickTime = new Date().toISOString();
-        const logTransaction = database.transaction(() => {
-            const tickResult = insertTick.run({ auctionId: auction.auctionDbId, tickTime, timer: auction.timer });
-            const tickId = tickResult.lastInsertRowid;
-            auction.roomSelections.forEach((indices, idx) => {
-                const roomMeta = auction.roomRecords[idx];
-                if (!roomMeta) return;
-                const stateResult = insertRoomState.run({
-                    tickId,
-                    roomId: roomMeta.id,
-                    price: auction.roomPrices[idx] ?? 0
-                });
-                const tickRoomStateId = stateResult.lastInsertRowid;
-                indices.forEach(personIdx => {
-                    const personMeta = auction.peopleRecords[personIdx];
-                    if (!personMeta) return;
-                    insertRoomPerson.run({
-                        tickRoomStateId,
-                        personId: personMeta.id
-                    });
-                });
-            });
+        await ensureAuctionRecord(auction, auction.auctionStartTime);
+        auctionPersistence.appendLogSnapshot({
+            auctionDbId: auction.auctionDbId,
+            externalId: auction.externalId || auction.id,
+            startedAtMs: auction.auctionStartTime,
+            tickTime: new Date().toISOString(),
+            timer: auction.timer,
+            rooms: auction.roomSelections.map((indices, idx) => ({
+                roomId: auction.roomRecords[idx]?.id,
+                price: auction.roomPrices[idx] ?? 0,
+                selectors: indices
+                    .map(personIdx => auction.peopleRecords[personIdx]?.id)
+                    .filter(personId => personId !== undefined)
+            })).filter(room => room.roomId !== undefined)
         });
-        logTransaction();
     } catch (e) {
         console.error('[LOG] Failed to write log tick to sqlite:', e);
     }
 }
 
 async function resolveAuctionDbId(requestedId) {
-    const database = await initDatabase();
+    await initDatabase();
     const active = getAuctionByKey(requestedId);
     if (active) {
         await ensureAuctionRecord(active, active.auctionStartTime);
@@ -1036,89 +899,12 @@ async function resolveAuctionDbId(requestedId) {
             externalId: active.externalId || active.id || requestedId
         };
     }
-    const row = database.prepare('SELECT id, externalId FROM auctions WHERE id = ? OR externalId = ? LIMIT 1').get(requestedId, requestedId);
-    if (row) {
-        return { auctionDbId: row.id, externalId: row.externalId || requestedId };
-    }
-    return null;
+    return auctionPersistence.resolveAuctionDbId(requestedId);
 }
 
 async function readAuctionLog(auctionDbId, externalId) {
-    const database = await initDatabase();
-    const peopleRows = database.prepare('SELECT id, name, emoji FROM people ORDER BY personOrder ASC').all();
-    const roomRows = database.prepare('SELECT id, name, description, initialPrice FROM rooms ORDER BY roomOrder ASC').all();
-    const tickRows = database.prepare('SELECT id, tickTime, timer FROM tick_logs WHERE auctionId = ? ORDER BY id ASC').all(auctionDbId);
-    if (tickRows.length === 0) {
-        return {
-            auctionId: externalId || auctionDbId,
-            auctionDbId,
-            auctionExternalId: externalId || null,
-            rooms: roomRows,
-            people: peopleRows,
-            ticks: []
-        };
-    }
-    const tickIds = tickRows.map(t => t.id);
-    const roomStateRows = database.prepare(`SELECT id, tickId, roomId, price FROM tick_room_states WHERE tickId IN (${tickIds.map(() => '?').join(',')})`).all(...tickIds);
-    const stateIds = roomStateRows.map(r => r.id);
-    const roomPeopleRows = stateIds.length
-        ? database.prepare(`SELECT tickRoomStateId, personId FROM tick_room_people WHERE tickRoomStateId IN (${stateIds.map(() => '?').join(',')})`).all(...stateIds)
-        : [];
-    const peopleByState = new Map();
-    roomPeopleRows.forEach(row => {
-        if (!peopleByState.has(row.tickRoomStateId)) peopleByState.set(row.tickRoomStateId, []);
-        peopleByState.get(row.tickRoomStateId).push(row.personId);
-    });
-    const statesByTick = new Map();
-    roomStateRows.forEach(row => {
-        const selectors = peopleByState.get(row.id) || [];
-        const state = { roomId: row.roomId, price: row.price, selectors };
-        if (!statesByTick.has(row.tickId)) statesByTick.set(row.tickId, []);
-        statesByTick.get(row.tickId).push(state);
-    });
-    const ticks = tickRows.map(t => ({
-        tickId: t.id,
-        tickTime: t.tickTime,
-        timer: t.timer,
-        rooms: statesByTick.get(t.id) || []
-    }));
-    return {
-        auctionId: externalId || auctionDbId,
-        auctionDbId,
-        auctionExternalId: externalId || null,
-        rooms: roomRows,
-        people: peopleRows,
-        ticks
-    };
-}
-
-function buildLogCsv(logData) {
-    const personLookup = new Map(logData.people.map(p => [p.id, p]));
-    const header = ['tickTime', 'timer'];
-    logData.rooms.forEach(r => {
-        header.push(`${r.name}Price`);
-    });
-    logData.rooms.forEach(r => {
-        header.push(`${r.name}Selectors`);
-    });
-    const lines = [header.join(',')];
-    logData.ticks.forEach(tick => {
-        const prices = [];
-        const selectors = [];
-        logData.rooms.forEach(room => {
-            const state = (tick.rooms || []).find(r => r.roomId === room.id);
-            prices.push(state ? state.price : '');
-            const sel = state ? (state.selectors || []).map(pid => personLookup.get(pid)?.emoji || personLookup.get(pid)?.name || pid).join(';') : '';
-            selectors.push(`"${sel}"`);
-        });
-        lines.push([
-            tick.tickTime,
-            tick.timer ?? '',
-            ...prices,
-            ...selectors
-        ].join(','));
-    });
-    return lines.join('\n');
+    await initDatabase();
+    return auctionPersistence.readAuctionLog(auctionDbId, externalId);
 }
 
 function handleSelectRoom(auction, ws, data) {
