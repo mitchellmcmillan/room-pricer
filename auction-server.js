@@ -163,6 +163,7 @@ function syncEngineStateFromAuction(auction) {
         startedAt: auction.auctionStartTime,
         paused: auction.paused,
         pauseReason: auction.pauseReason,
+        countdownEndsAt: auction.auctionCountdownEndTime,
         timer: auction.timer,
         allocationLocked: auction.allocationLocked
     };
@@ -180,6 +181,7 @@ function syncAuctionFromEngineState(auction) {
     auction.auctionStartTime = auction.engineState.startedAt;
     auction.paused = auction.engineState.paused;
     auction.pauseReason = auction.engineState.pauseReason;
+    auction.auctionCountdownEndTime = auction.engineState.countdownEndsAt;
     auction.timer = auction.engineState.timer;
     auction.allocationLocked = auction.engineState.allocationLocked;
 }
@@ -192,6 +194,12 @@ function applyEngineEffects(auction, effects) {
         }
         if (effect.type === 'cancel_countdown') {
             cancelAuctionCountdown(auction);
+        }
+        if (effect.type === 'start_countdown') {
+            startEngineCountdown(auction, effect);
+        }
+        if (effect.type === 'schedule_tick') {
+            scheduleNextTick(auction);
         }
     });
 }
@@ -410,6 +418,9 @@ function cancelAuctionCountdown(auction) {
     }
     auction.auctionCountdownEndTime = null;
     auction.auctionCountdownRemainingMs = null;
+    if (auction.engineState) {
+        auction.engineState = { ...auction.engineState, countdownEndsAt: null };
+    }
 }
 
 function pauseAuctionCountdown(auction) {
@@ -424,12 +435,12 @@ function pauseAuctionCountdown(auction) {
     return true;
 }
 
-function startReadyCountdown(auction, durationMs = AUCTION_READY_COUNTDOWN_MS) {
-    const countdownMs = Math.max(1, Math.floor(durationMs));
+function startEngineCountdown(auction, effect) {
+    const countdownMs = Math.max(1, Math.floor(effect.endsAt - Date.now()));
     if (auction.auctionCountdownTimeout) {
         clearTimeout(auction.auctionCountdownTimeout);
     }
-    auction.auctionCountdownEndTime = Date.now() + countdownMs;
+    auction.auctionCountdownEndTime = effect.endsAt;
     auction.auctionCountdownRemainingMs = null;
     broadcast(auction, {
         type: 'auction_countdown',
@@ -437,18 +448,17 @@ function startReadyCountdown(auction, durationMs = AUCTION_READY_COUNTDOWN_MS) {
     });
     auction.auctionCountdownTimeout = setTimeout(async () => {
         auction.auctionCountdownTimeout = null;
-        const resumingPausedAuction = !!auction.paused;
-        auction.auctionStartTime = Date.now();
-        if (!resumingPausedAuction) {
-            auction.timer = 0;
+        syncEngineStateFromAuction(auction);
+        const result = applyAuctionCommand(auction.engineState, { type: 'countdown_elapsed' }, Date.now());
+        if (!result.ok) {
+            console.error(`[AUCTION] Countdown elapsed failed for ${auction.id}: ${result.error.message}`);
+            return;
         }
-        auction.paused = false;
-        auction.pauseReason = null;
+        auction.engineState = result.state;
+        syncAuctionFromEngineState(auction);
         maybeLockAllocation(auction);
         await ensureAuctionRecord(auction, auction.auctionStartTime);
-        auction.auctionCountdownEndTime = null;
-        auction.auctionCountdownRemainingMs = null;
-        scheduleNextTick(auction);
+        applyEngineEffects(auction, result.effects);
         sendAuctionState(auction);
     }, countdownMs);
 }
@@ -1263,27 +1273,24 @@ function getAuctionByKey(key) {
 
 async function handleStartAuction(auction) {
     if (auction.ended) return false;
-    if (auction.auctionStartTime) return false;
-    if (auction.allocationLocked) return false;
-    cancelAuctionCountdown(auction);
-    const resumingPausedAuction = !!auction.paused;
-    auction.auctionStartTime = Date.now();
-    if (!resumingPausedAuction) {
-        auction.timer = 0;
+    syncEngineStateFromAuction(auction);
+    const result = applyAuctionCommand(auction.engineState, { type: 'start' }, Date.now());
+    if (!result.ok) {
+        return false;
     }
-    auction.paused = false;
-    auction.pauseReason = null;
+    auction.engineState = result.state;
+    syncAuctionFromEngineState(auction);
     maybeLockAllocation(auction);
     await ensureAuctionRecord(auction, auction.auctionStartTime);
     console.log(`[AUCTION] Auction ${auction.id} started, scheduling first tick.`);
-    scheduleNextTick(auction);
+    applyEngineEffects(auction, result.effects);
     sendAuctionState(auction, {
         ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
     });
     return true;
 }
 
-function handleReadyUpdate(auction, ws, data) {
+async function handleReadyUpdate(auction, ws, data) {
     if (typeof data.personIdx !== 'number' || typeof data.ready !== 'boolean') {
         ws.send(JSON.stringify({ type: 'error', message: 'Invalid set_ready data.' }));
         return;
@@ -1297,23 +1304,27 @@ function handleReadyUpdate(auction, ws, data) {
         ws.send(JSON.stringify({ type: 'error', message: 'You may only ready the person you control.' }));
         return;
     }
-    auction.readyPeople = auction.readyPeople.filter(idx => idx !== data.personIdx);
-    if (data.ready) {
-        auction.readyPeople.push(data.personIdx);
-    } else if (auction.auctionCountdownTimeout || auction.auctionCountdownRemainingMs !== null) {
-        cancelAuctionCountdown(auction);
+    const personId = getPersonIdByIndex(auction, data.personIdx);
+    syncEngineStateFromAuction(auction);
+    const result = applyAuctionCommand(auction.engineState, {
+        type: 'set_ready',
+        personId,
+        ready: data.ready,
+        countdownMs: auction.auctionCountdownRemainingMs ?? AUCTION_READY_COUNTDOWN_MS
+    }, Date.now());
+    if (!result.ok) {
+        sendEngineError(ws, result);
+        return false;
     }
+    auction.engineState = result.state;
+    syncAuctionFromEngineState(auction);
+    applyEngineEffects(auction, result.effects);
     broadcast(auction, {
         type: 'ready_update',
         readyPeople: auction.readyPeople,
         chosenPeople: auction.chosenPeople,
         ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
     });
-    const allClaimed = auction.chosenPeople.length === auction.people.length;
-    if (auction.readyPeople.length === auction.people.length && auction.people.length > 0 && allClaimed && !auction.auctionCountdownEndTime && !auction.auctionStartTime && !auction.allocationLocked) {
-        const countdownMs = auction.auctionCountdownRemainingMs ?? AUCTION_READY_COUNTDOWN_MS;
-        startReadyCountdown(auction, countdownMs);
-    }
     return true;
 }
 // Auction tick logic: event-driven except for 10s tick
@@ -1482,7 +1493,7 @@ wss.on('connection', (ws, req) => {
                 }
                 break;
             case 'set_ready':
-                if (handleReadyUpdate(auction, ws, data)) {
+                if (await handleReadyUpdate(auction, ws, data)) {
                     await logTick(auction);
                 }
                 break;

@@ -126,3 +126,75 @@ test('a room selection requires an existing room', () => {
         }
     });
 });
+
+test('all claimed people ready requests countdown', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1, 2],
+        readyPersonIds: [1]
+    };
+    const result = applyAuctionCommand(state, { type: 'set_ready', personId: 2, ready: true, countdownMs: 5000 }, 1000);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.readyPersonIds, [1, 2]);
+    assert.equal(result.state.countdownEndsAt, 6000);
+    assert.deepEqual(result.events, [{ type: 'ready_changed', personId: 2, ready: true }]);
+    assert.deepEqual(result.effects, [{ type: 'start_countdown', endsAt: 6000, durationMs: 5000 }]);
+});
+
+test('clearing readiness cancels an active countdown', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1, 2],
+        readyPersonIds: [1, 2],
+        countdownEndsAt: 6000
+    };
+    const result = applyAuctionCommand(state, { type: 'set_ready', personId: 1, ready: false }, 2000);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.readyPersonIds, [2]);
+    assert.equal(result.state.countdownEndsAt, null);
+    assert.deepEqual(result.effects, [{ type: 'cancel_countdown' }]);
+});
+
+test('countdown elapsed starts the auction and schedules ticks', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1, 2],
+        readyPersonIds: [1, 2],
+        countdownEndsAt: 6000
+    };
+    const result = applyAuctionCommand(state, { type: 'countdown_elapsed' }, 6000);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.state.startedAt, 6000);
+    assert.equal(result.state.countdownEndsAt, null);
+    assert.equal(result.state.paused, false);
+    assert.deepEqual(result.events, [{ type: 'auction_started' }]);
+    assert.deepEqual(result.effects, [{ type: 'schedule_tick' }]);
+});
+
+test('manual start starts the auction and schedules ticks', () => {
+    const state = createAuctionEngineState(roster);
+    const result = applyAuctionCommand(state, { type: 'start' }, 1000);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.state.startedAt, 1000);
+    assert.deepEqual(result.effects, [{ type: 'schedule_tick' }]);
+});
+
+test('manual start fails once auction already started', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        startedAt: 1000
+    };
+    const result = applyAuctionCommand(state, { type: 'start' }, 2000);
+
+    assert.deepEqual(result, {
+        ok: false,
+        error: {
+            code: 'auction_already_started',
+            message: 'Auction already started or ended.'
+        }
+    });
+});
