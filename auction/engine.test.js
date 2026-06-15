@@ -73,3 +73,56 @@ test('disconnect during active auction releases the person and pauses the auctio
         { type: 'auction_paused', reason: 'bidder_disconnected' }
     ]);
 });
+
+test('a claimed person can select one room', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1]
+    };
+    const result = applyAuctionCommand(state, { type: 'select_room', personId: 1, roomId: 10 }, 1000);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.selectedRoomByPersonId, { 1: 10 });
+    assert.deepEqual(result.events, [{ type: 'room_selected', personId: 1, roomId: 10 }]);
+});
+
+test('selecting another room moves the claimed person', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1],
+        selectedRoomByPersonId: { 1: 10 }
+    };
+    const result = applyAuctionCommand(state, { type: 'select_room', personId: 1, roomId: 20 }, 1000);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.selectedRoomByPersonId, { 1: 20 });
+});
+
+test('a person must be claimed before selecting a room', () => {
+    const state = createAuctionEngineState(roster);
+    const result = applyAuctionCommand(state, { type: 'select_room', personId: 1, roomId: 10 }, 1000);
+
+    assert.deepEqual(result, {
+        ok: false,
+        error: {
+            code: 'person_not_claimed',
+            message: 'Person must be claimed before selecting a room.'
+        }
+    });
+});
+
+test('a room selection requires an existing room', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1]
+    };
+    const result = applyAuctionCommand(state, { type: 'select_room', personId: 1, roomId: 99 }, 1000);
+
+    assert.deepEqual(result, {
+        ok: false,
+        error: {
+            code: 'unknown_room',
+            message: 'Unknown room.'
+        }
+    });
+});

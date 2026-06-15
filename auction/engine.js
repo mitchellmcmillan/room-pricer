@@ -48,6 +48,8 @@ export function applyAuctionCommand(state, command, now) {
             return claimPerson(state, command.personId);
         case 'release_person':
             return releasePerson(state, command.personId, command.reason);
+        case 'select_room':
+            return selectRoom(state, command.personId, command.roomId);
         default:
             return commandError('unknown_command', 'Unknown auction command.');
     }
@@ -99,4 +101,29 @@ function releasePerson(state, personId, reason) {
     }
 
     return { ok: true, state: nextState, events, effects };
+}
+
+function selectRoom(state, personId, roomId) {
+    if (!hasId(state.personIds, personId)) {
+        return commandError('unknown_person', 'Unknown person.');
+    }
+    if (!hasId(state.roomIds, roomId)) {
+        return commandError('unknown_room', 'Unknown room.');
+    }
+    if (!hasId(state.claimedPersonIds, personId)) {
+        return commandError('person_not_claimed', 'Person must be claimed before selecting a room.');
+    }
+
+    return {
+        ok: true,
+        state: {
+            ...state,
+            selectedRoomByPersonId: {
+                ...state.selectedRoomByPersonId,
+                [personId]: roomId
+            }
+        },
+        events: [{ type: 'room_selected', personId, roomId }],
+        effects: []
+    };
 }

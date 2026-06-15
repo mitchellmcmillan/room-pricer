@@ -9,6 +9,7 @@ import { promises as fsp } from 'fs';
 import Database from 'better-sqlite3';
 import { applyAuctionCommand, createAuctionEngineState } from './auction/engine.js';
 import { validateRoomAuctionRoster } from './auction/roster.js';
+import { buildClientAuctionSnapshot } from './auction/snapshot.js';
 
 const PORT = 8080;
 const DIST_DIR = path.resolve('dist');
@@ -140,10 +141,6 @@ function getPersonIdByIndex(auction, personIdx) {
     return auction.peopleRecords[personIdx]?.id;
 }
 
-function getPersonIndexById(auction, personId) {
-    return auction.peopleRecords.findIndex(person => String(person.id) === String(personId));
-}
-
 function getRoomIdByIndex(auction, roomIdx) {
     return auction.roomRecords[roomIdx]?.id;
 }
@@ -172,18 +169,14 @@ function syncEngineStateFromAuction(auction) {
 }
 
 function syncAuctionFromEngineState(auction) {
-    auction.chosenPeople = auction.engineState.claimedPersonIds
-        .map(personId => getPersonIndexById(auction, personId))
-        .filter(personIdx => personIdx >= 0);
-    auction.readyPeople = auction.engineState.readyPersonIds
-        .map(personId => getPersonIndexById(auction, personId))
-        .filter(personIdx => personIdx >= 0);
-    auction.roomSelections = auction.roomRecords.map(() => []);
-    Object.entries(auction.engineState.selectedRoomByPersonId).forEach(([personId, roomId]) => {
-        const personIdx = getPersonIndexById(auction, personId);
-        const roomIdx = auction.roomRecords.findIndex(room => String(room.id) === String(roomId));
-        if (personIdx >= 0 && roomIdx >= 0) auction.roomSelections[roomIdx].push(personIdx);
+    const snapshot = buildClientAuctionSnapshot(auction.engineState, {
+        peopleRecords: auction.peopleRecords,
+        roomRecords: auction.roomRecords
     });
+    auction.chosenPeople = snapshot.chosenPeople;
+    auction.readyPeople = snapshot.readyPeople;
+    auction.roomSelections = snapshot.roomSelections;
+    auction.roomPrices = snapshot.roomPrices;
     auction.auctionStartTime = auction.engineState.startedAt;
     auction.paused = auction.engineState.paused;
     auction.pauseReason = auction.engineState.pauseReason;
@@ -1139,8 +1132,16 @@ function handleSelectRoom(auction, ws, data) {
         ws.send(JSON.stringify({ type: 'error', message: 'You may only move the person you control.' }));
         return false;
     }
-    auction.roomSelections = auction.roomSelections.map(arr => arr.filter(i => i !== data.personIdx));
-    auction.roomSelections[data.roomIdx].push(data.personIdx);
+    const personId = getPersonIdByIndex(auction, data.personIdx);
+    const roomId = getRoomIdByIndex(auction, data.roomIdx);
+    syncEngineStateFromAuction(auction);
+    const result = applyAuctionCommand(auction.engineState, { type: 'select_room', personId, roomId }, Date.now());
+    if (!result.ok) {
+        sendEngineError(ws, result);
+        return false;
+    }
+    auction.engineState = result.state;
+    syncAuctionFromEngineState(auction);
     maybeLockAllocation(auction);
     sendAuctionState(auction, {
         ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
