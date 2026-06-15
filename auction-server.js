@@ -101,6 +101,7 @@ function createAuctionState(id, config) {
     const engineState = createAuctionEngineState({
         people: config.peopleRecords,
         rooms: config.roomRecords,
+        tickAmount: config.tickAmount,
         initialPricesByRoomId: Object.fromEntries(config.roomRecords.map((room, idx) => [room.id, config.initialPrices[idx] ?? 0]))
     });
     return {
@@ -160,12 +161,15 @@ function syncEngineStateFromAuction(auction) {
         claimedPersonIds: auction.chosenPeople.map(personIdx => getPersonIdByIndex(auction, personIdx)).filter(id => id !== undefined),
         readyPersonIds: auction.readyPeople.map(personIdx => getPersonIdByIndex(auction, personIdx)).filter(id => id !== undefined),
         selectedRoomByPersonId,
+        roomPricesById: Object.fromEntries(auction.roomRecords.map((room, idx) => [room.id, auction.roomPrices[idx] ?? 0])),
+        tickAmount: auction.tickAmount,
         startedAt: auction.auctionStartTime,
         paused: auction.paused,
         pauseReason: auction.pauseReason,
         countdownEndsAt: auction.auctionCountdownEndTime,
         timer: auction.timer,
-        allocationLocked: auction.allocationLocked
+        allocationLocked: auction.allocationLocked,
+        ended: !!auction.ended
     };
 }
 
@@ -184,6 +188,7 @@ function syncAuctionFromEngineState(auction) {
     auction.auctionCountdownEndTime = auction.engineState.countdownEndsAt;
     auction.timer = auction.engineState.timer;
     auction.allocationLocked = auction.engineState.allocationLocked;
+    auction.ended = auction.engineState.ended;
 }
 
 function applyEngineEffects(auction, effects) {
@@ -201,26 +206,16 @@ function applyEngineEffects(auction, effects) {
         if (effect.type === 'schedule_tick') {
             scheduleNextTick(auction);
         }
+        if (effect.type === 'close_connections') {
+            setTimeout(() => {
+                auction.clients.forEach(client => client.close());
+            }, 0);
+        }
     });
 }
 
 function sendEngineError(ws, result) {
     ws.send(JSON.stringify({ type: 'error', message: result.error.message, code: result.error.code }));
-}
-
-function isAllocationFound(auction) {
-    if (!auction || auction.people.length === 0) return false;
-    const totalSelected = auction.roomSelections.reduce((sum, arr) => sum + arr.length, 0);
-    return totalSelected === auction.people.length && auction.roomSelections.every(arr => arr.length === 1);
-}
-
-function maybeLockAllocation(auction) {
-    // Lock only after the auction has started.
-    if (!auction || !auction.auctionStartTime || auction.allocationLocked) return;
-    if (isAllocationFound(auction)) {
-        auction.allocationLocked = true;
-        console.log(`[AUCTION] Allocation found for ${auction.externalId || auction.id}; restart disabled.`);
-    }
 }
 
 function cancelIdleCloseTimer(auction) {
@@ -456,7 +451,6 @@ function startEngineCountdown(auction, effect) {
         }
         auction.engineState = result.state;
         syncAuctionFromEngineState(auction);
-        maybeLockAllocation(auction);
         await ensureAuctionRecord(auction, auction.auctionStartTime);
         applyEngineEffects(auction, result.effects);
         sendAuctionState(auction);
@@ -687,12 +681,12 @@ async function handleApi(req, res) {
             sendJson(res, 404, { error: 'Auction not found', code: 'not_found' });
             return true;
         }
-        auction.ended = true;
-        if (auction.tickTimeout) clearTimeout(auction.tickTimeout);
-        cancelAuctionCountdown(auction);
+        syncEngineStateFromAuction(auction);
+        const result = applyAuctionCommand(auction.engineState, { type: 'end' }, Date.now());
+        auction.engineState = result.state;
+        syncAuctionFromEngineState(auction);
+        applyEngineEffects(auction, result.effects);
         broadcast(auction, { type: 'auction_end' });
-        auction.readyPeople = [];
-        auction.clients.forEach(client => client.close());
         sendJson(res, 200, { auctionId: auction.id, externalId: auction.externalId, ended: true });
         incMetric('api_requests_total');
         return true;
@@ -794,22 +788,21 @@ server.listen(PORT, () => {
 });
 
 function updateAuctionLogic(auction) {
-    if (!auction.auctionStartTime) {
-        console.log('[TICK] Auction not started, skipping tick logic.');
-        return;
+    syncEngineStateFromAuction(auction);
+    const result = applyAuctionCommand(auction.engineState, { type: 'tick' }, Date.now());
+    if (!result.ok) {
+        console.log(`[TICK] ${result.error.message}`);
+        return false;
     }
-    // Pricing logic: change = (number of persons choosing the room - 1) * tickAmount
     console.log(`[TICK] Price update at timer=${auction.timer} for ${auction.id}`);
-    let newPrices = [...auction.roomPrices];
-    auction.roomSelections.forEach((arr, i) => {
-        const change = (arr.length - 1) * auction.tickAmount;
-        newPrices[i] += change;
-    });
-    newPrices = newPrices.map(p => Math.round(p));
     console.log(`[TICK] Prices before: ${JSON.stringify(auction.roomPrices)}`);
-    console.log(`[TICK] Prices after:  ${JSON.stringify(newPrices)}`);
-    auction.roomPrices = newPrices;
-    auction.timer += 1;
+    auction.engineState = result.state;
+    syncAuctionFromEngineState(auction);
+    console.log(`[TICK] Prices after:  ${JSON.stringify(auction.roomPrices)}`);
+    if (result.events.some(event => event.type === 'allocation_locked')) {
+        console.log(`[AUCTION] Allocation found for ${auction.externalId || auction.id}; restart disabled.`);
+    }
+    return true;
 }
 
 async function ensureLogDir() {
@@ -1152,7 +1145,6 @@ function handleSelectRoom(auction, ws, data) {
     }
     auction.engineState = result.state;
     syncAuctionFromEngineState(auction);
-    maybeLockAllocation(auction);
     sendAuctionState(auction, {
         ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
     });
@@ -1280,7 +1272,6 @@ async function handleStartAuction(auction) {
     }
     auction.engineState = result.state;
     syncAuctionFromEngineState(auction);
-    maybeLockAllocation(auction);
     await ensureAuctionRecord(auction, auction.auctionStartTime);
     console.log(`[AUCTION] Auction ${auction.id} started, scheduling first tick.`);
     applyEngineEffects(auction, result.effects);
@@ -1338,7 +1329,7 @@ function scheduleNextTick(auction) {
     auction.tickTimeout = setTimeout(async () => {
         if (auction.ended) return;
         console.log(`[TICK] Tick fired at ${new Date().toISOString()} (timer=${auction.timer}) for ${auction.id}`);
-        updateAuctionLogic(auction);
+        if (!updateAuctionLogic(auction)) return;
         console.log('[TICK] Broadcasting auction_update on tick.');
         sendAuctionState(auction);
         await logTick(auction);

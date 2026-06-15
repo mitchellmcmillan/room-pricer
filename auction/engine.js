@@ -29,6 +29,7 @@ export function createAuctionEngineState(config) {
     return {
         personIds: people.map(person => person.id),
         roomIds: rooms.map(room => room.id),
+        tickAmount: Number.isFinite(Number(config.tickAmount)) ? Number(config.tickAmount) : 1,
         roomPricesById: { ...(config.initialPricesByRoomId || {}) },
         selectedRoomByPersonId: {},
         claimedPersonIds: [],
@@ -38,7 +39,8 @@ export function createAuctionEngineState(config) {
         pauseReason: null,
         countdownEndsAt: null,
         timer: 0,
-        allocationLocked: false
+        allocationLocked: false,
+        ended: false
     };
 }
 
@@ -56,6 +58,10 @@ export function applyAuctionCommand(state, command, now) {
             return countdownElapsed(state, now);
         case 'start':
             return startAuction(state, now);
+        case 'tick':
+            return tickAuction(state, command.tickAmount);
+        case 'end':
+            return endAuction(state);
         default:
             return commandError('unknown_command', 'Unknown auction command.');
     }
@@ -120,16 +126,22 @@ function selectRoom(state, personId, roomId) {
         return commandError('person_not_claimed', 'Person must be claimed before selecting a room.');
     }
 
+    const nextState = maybeLockAllocation({
+        ...state,
+        selectedRoomByPersonId: {
+            ...state.selectedRoomByPersonId,
+            [personId]: roomId
+        }
+    });
+    const events = [{ type: 'room_selected', personId, roomId }];
+    if (!state.allocationLocked && nextState.allocationLocked) {
+        events.push({ type: 'allocation_locked' });
+    }
+
     return {
         ok: true,
-        state: {
-            ...state,
-            selectedRoomByPersonId: {
-                ...state.selectedRoomByPersonId,
-                [personId]: roomId
-            }
-        },
-        events: [{ type: 'room_selected', personId, roomId }],
+        state: nextState,
+        events,
         effects: []
     };
 }
@@ -177,6 +189,9 @@ function countdownElapsed(state, now) {
 }
 
 function startAuction(state, now) {
+    if (state.ended) {
+        return commandError('auction_already_started', 'Auction already started or ended.');
+    }
     if (state.startedAt !== null) {
         return commandError('auction_already_started', 'Auction already started or ended.');
     }
@@ -184,20 +199,76 @@ function startAuction(state, now) {
         return commandError('allocation_locked', 'Auction cannot be restarted once allocation has been found.');
     }
     const resumingPausedAuction = state.paused === true;
+    const nextState = maybeLockAllocation({
+        ...state,
+        startedAt: now,
+        countdownEndsAt: null,
+        paused: false,
+        pauseReason: null,
+        timer: resumingPausedAuction ? state.timer : 0
+    });
+    const events = [{ type: 'auction_started' }];
+    if (!state.allocationLocked && nextState.allocationLocked) {
+        events.push({ type: 'allocation_locked' });
+    }
     return {
         ok: true,
-        state: {
-            ...state,
-            startedAt: now,
-            countdownEndsAt: null,
-            paused: false,
-            pauseReason: null,
-            timer: resumingPausedAuction ? state.timer : 0
-        },
-        events: [{ type: 'auction_started' }],
+        state: nextState,
+        events,
         effects: [
             ...(state.countdownEndsAt !== null ? [{ type: 'cancel_countdown' }] : []),
             { type: 'schedule_tick' }
         ]
     };
+}
+
+function tickAuction(state, tickAmount) {
+    if (state.startedAt === null || state.ended) {
+        return commandError('auction_not_started', 'Auction not started.');
+    }
+    const amount = Number.isFinite(Number(tickAmount)) ? Number(tickAmount) : state.tickAmount;
+    const roomPricesById = {};
+    state.roomIds.forEach(roomId => {
+        const selectorCount = Object.values(state.selectedRoomByPersonId)
+            .filter(selectedRoomId => normalizeId(selectedRoomId) === normalizeId(roomId))
+            .length;
+        const currentPrice = Number(state.roomPricesById[roomId] ?? 0);
+        roomPricesById[roomId] = Math.round(currentPrice + ((selectorCount - 1) * amount));
+    });
+    const nextState = maybeLockAllocation({
+        ...state,
+        roomPricesById,
+        timer: state.timer + 1
+    });
+    const events = [{ type: 'tick_applied' }];
+    if (!state.allocationLocked && nextState.allocationLocked) {
+        events.push({ type: 'allocation_locked' });
+    }
+    return { ok: true, state: nextState, events, effects: [] };
+}
+
+function endAuction(state) {
+    return {
+        ok: true,
+        state: {
+            ...state,
+            ended: true,
+            startedAt: null,
+            countdownEndsAt: null,
+            readyPersonIds: []
+        },
+        events: [{ type: 'auction_ended' }],
+        effects: [{ type: 'cancel_tick' }, { type: 'cancel_countdown' }, { type: 'close_connections' }]
+    };
+}
+
+function maybeLockAllocation(state) {
+    if (state.allocationLocked || state.startedAt === null) return state;
+    const selectedRoomIds = Object.values(state.selectedRoomByPersonId);
+    const allPeopleSelected = state.personIds.every(personId => state.selectedRoomByPersonId[personId] !== undefined);
+    const everyRoomSelectedOnce = state.roomIds.every(roomId => (
+        selectedRoomIds.filter(selectedRoomId => normalizeId(selectedRoomId) === normalizeId(roomId)).length === 1
+    ));
+    if (!allPeopleSelected || !everyRoomSelectedOnce) return state;
+    return { ...state, allocationLocked: true };
 }

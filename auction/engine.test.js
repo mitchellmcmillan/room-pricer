@@ -198,3 +198,77 @@ test('manual start fails once auction already started', () => {
         }
     });
 });
+
+test('tick updates room prices and increments timer while auction is active', () => {
+    const state = {
+        ...createAuctionEngineState({ ...roster, initialPricesByRoomId: { 10: 100, 20: 100 }, tickAmount: 5 }),
+        startedAt: 1000,
+        selectedRoomByPersonId: { 1: 10, 2: 10 }
+    };
+    const result = applyAuctionCommand(state, { type: 'tick' }, 2000);
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.state.roomPricesById, { 10: 105, 20: 95 });
+    assert.equal(result.state.timer, 1);
+    assert.deepEqual(result.events, [{ type: 'tick_applied' }]);
+});
+
+test('tick fails while auction is inactive', () => {
+    const state = createAuctionEngineState(roster);
+    const result = applyAuctionCommand(state, { type: 'tick' }, 2000);
+
+    assert.deepEqual(result, {
+        ok: false,
+        error: {
+            code: 'auction_not_started',
+            message: 'Auction not started.'
+        }
+    });
+});
+
+test('one-to-one allocation locks after auction start', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1, 2],
+        startedAt: 1000,
+        selectedRoomByPersonId: { 1: 10 }
+    };
+    const result = applyAuctionCommand(state, { type: 'select_room', personId: 2, roomId: 20 }, 2000);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.state.allocationLocked, true);
+    assert.deepEqual(result.events, [
+        { type: 'room_selected', personId: 2, roomId: 20 },
+        { type: 'allocation_locked' }
+    ]);
+});
+
+test('manual start fails after allocation locks', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        allocationLocked: true
+    };
+    const result = applyAuctionCommand(state, { type: 'start' }, 2000);
+
+    assert.deepEqual(result, {
+        ok: false,
+        error: {
+            code: 'allocation_locked',
+            message: 'Auction cannot be restarted once allocation has been found.'
+        }
+    });
+});
+
+test('ending the auction cancels timers and closes connections', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        startedAt: 1000,
+        countdownEndsAt: 5000
+    };
+    const result = applyAuctionCommand(state, { type: 'end' }, 2000);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.state.ended, true);
+    assert.deepEqual(result.events, [{ type: 'auction_ended' }]);
+    assert.deepEqual(result.effects, [{ type: 'cancel_tick' }, { type: 'cancel_countdown' }, { type: 'close_connections' }]);
+});
