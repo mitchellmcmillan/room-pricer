@@ -12,6 +12,7 @@ import {
 } from 'react-router-dom';
 import 'emoji-picker-element';
 import { API_BASE } from './networkConfig';
+import { validateRoomAuctionRoster } from '../auction/roster.js';
 
 function Landing({ onJoin, onCreate, onVisualise }) {
   const [joinWords, setJoinWords] = useState(['', '', '', '']);
@@ -288,6 +289,11 @@ function StartPage() {
     const validRooms = rooms.filter(r => r.name && r.name.trim());
     if (validPeople.length === 0 || validRooms.length === 0) {
       setError('Add at least one person and one room before continuing.');
+      return;
+    }
+    const rosterValidation = validateRoomAuctionRoster({ people: validPeople, rooms: validRooms });
+    if (!rosterValidation.ok) {
+      setError(rosterValidation.error.message);
       return;
     }
 

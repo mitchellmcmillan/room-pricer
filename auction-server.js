@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { promises as fsp } from 'fs';
 import Database from 'better-sqlite3';
+import { validateRoomAuctionRoster } from './auction/roster.js';
 
 const PORT = 8080;
 const DIST_DIR = path.resolve('dist');
@@ -168,7 +169,8 @@ function scheduleIdleCloseIfEmpty(auction) {
         broadcast(auction, { type: 'auction_end', reason: 'inactivity_timeout' });
         auctions.delete(timedOutAuctionId);
         if (wasDefaultAuction) {
-            const hasRoster = peopleRecords.length > 0 && roomRecords.length > 0;
+            const rosterValidation = validateRoomAuctionRoster({ people: peopleRecords, rooms: roomRecords }, { allowEmpty: true });
+            const hasRoster = peopleRecords.length > 0 && roomRecords.length > 0 && rosterValidation.ok;
             if (hasRoster) {
                 const replacement = createAuctionFromBase();
                 defaultAuctionId = replacement.id;
@@ -443,6 +445,11 @@ async function handleApi(req, res) {
                 sendJson(res, 400, { error: 'Roster must include people and rooms', code: 'roster_invalid' });
                 return true;
             }
+            const rosterValidation = validateRoomAuctionRoster({ people: incomingPeople, rooms: incomingRooms });
+            if (!rosterValidation.ok) {
+                sendJson(res, 400, { error: rosterValidation.error.message, code: rosterValidation.error.code });
+                return true;
+            }
             const database = await initDatabase();
             const tx = database.transaction(() => {
                 // Clear dependent historical data first to satisfy FK constraints
@@ -512,6 +519,11 @@ async function handleApi(req, res) {
         }
         if (peopleRecords.length === 0 || roomRecords.length === 0) {
             sendJson(res, 409, { error: 'Roster missing', code: 'roster_missing' });
+            return true;
+        }
+        const rosterValidation = validateRoomAuctionRoster({ people: peopleRecords, rooms: roomRecords });
+        if (!rosterValidation.ok) {
+            sendJson(res, 409, { error: rosterValidation.error.message, code: rosterValidation.error.code });
             return true;
         }
         const auction = createAuctionFromBase();
@@ -864,7 +876,8 @@ async function loadConfigFromDatabase(options = {}) {
         peopleRecords,
         roomRecords
     };
-    const hasRoster = peopleRecords.length > 0 && roomRecords.length > 0;
+    const rosterValidation = validateRoomAuctionRoster({ people: peopleRecords, rooms: roomRecords }, { allowEmpty: true });
+    const hasRoster = peopleRecords.length > 0 && roomRecords.length > 0 && rosterValidation.ok;
     if (!defaultAuctionId || resetDefaultAuction) {
         if (hasRoster) {
             const auction = createAuctionFromBase();
