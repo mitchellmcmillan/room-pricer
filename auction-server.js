@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { promises as fsp } from 'fs';
 import Database from 'better-sqlite3';
+import { applyAuctionCommand, createAuctionEngineState } from './auction/engine.js';
 import { validateRoomAuctionRoster } from './auction/roster.js';
 
 const PORT = 8080;
@@ -96,6 +97,11 @@ function generateThreeWordKey() {
 
 function createAuctionState(id, config) {
     if (!config) throw new Error('Base config not loaded yet');
+    const engineState = createAuctionEngineState({
+        people: config.peopleRecords,
+        rooms: config.roomRecords,
+        initialPricesByRoomId: Object.fromEntries(config.roomRecords.map((room, idx) => [room.id, config.initialPrices[idx] ?? 0]))
+    });
     return {
         id,
         externalId: id,
@@ -125,8 +131,80 @@ function createAuctionState(id, config) {
         roomRecords: config.roomRecords,
         clients: new Set(),
         clientPersonMap: new Map(),
-        pendingJoinTimers: new Map()
+        pendingJoinTimers: new Map(),
+        engineState
     };
+}
+
+function getPersonIdByIndex(auction, personIdx) {
+    return auction.peopleRecords[personIdx]?.id;
+}
+
+function getPersonIndexById(auction, personId) {
+    return auction.peopleRecords.findIndex(person => String(person.id) === String(personId));
+}
+
+function getRoomIdByIndex(auction, roomIdx) {
+    return auction.roomRecords[roomIdx]?.id;
+}
+
+function syncEngineStateFromAuction(auction) {
+    const selectedRoomByPersonId = {};
+    auction.roomSelections.forEach((personIndices, roomIdx) => {
+        const roomId = getRoomIdByIndex(auction, roomIdx);
+        if (roomId === undefined) return;
+        personIndices.forEach(personIdx => {
+            const personId = getPersonIdByIndex(auction, personIdx);
+            if (personId !== undefined) selectedRoomByPersonId[personId] = roomId;
+        });
+    });
+    auction.engineState = {
+        ...auction.engineState,
+        claimedPersonIds: auction.chosenPeople.map(personIdx => getPersonIdByIndex(auction, personIdx)).filter(id => id !== undefined),
+        readyPersonIds: auction.readyPeople.map(personIdx => getPersonIdByIndex(auction, personIdx)).filter(id => id !== undefined),
+        selectedRoomByPersonId,
+        startedAt: auction.auctionStartTime,
+        paused: auction.paused,
+        pauseReason: auction.pauseReason,
+        timer: auction.timer,
+        allocationLocked: auction.allocationLocked
+    };
+}
+
+function syncAuctionFromEngineState(auction) {
+    auction.chosenPeople = auction.engineState.claimedPersonIds
+        .map(personId => getPersonIndexById(auction, personId))
+        .filter(personIdx => personIdx >= 0);
+    auction.readyPeople = auction.engineState.readyPersonIds
+        .map(personId => getPersonIndexById(auction, personId))
+        .filter(personIdx => personIdx >= 0);
+    auction.roomSelections = auction.roomRecords.map(() => []);
+    Object.entries(auction.engineState.selectedRoomByPersonId).forEach(([personId, roomId]) => {
+        const personIdx = getPersonIndexById(auction, personId);
+        const roomIdx = auction.roomRecords.findIndex(room => String(room.id) === String(roomId));
+        if (personIdx >= 0 && roomIdx >= 0) auction.roomSelections[roomIdx].push(personIdx);
+    });
+    auction.auctionStartTime = auction.engineState.startedAt;
+    auction.paused = auction.engineState.paused;
+    auction.pauseReason = auction.engineState.pauseReason;
+    auction.timer = auction.engineState.timer;
+    auction.allocationLocked = auction.engineState.allocationLocked;
+}
+
+function applyEngineEffects(auction, effects) {
+    effects.forEach(effect => {
+        if (effect.type === 'cancel_tick' && auction.tickTimeout) {
+            clearTimeout(auction.tickTimeout);
+            auction.tickTimeout = null;
+        }
+        if (effect.type === 'cancel_countdown') {
+            cancelAuctionCountdown(auction);
+        }
+    });
+}
+
+function sendEngineError(ws, result) {
+    ws.send(JSON.stringify({ type: 'error', message: result.error.message, code: result.error.code }));
 }
 
 function isAllocationFound(auction) {
@@ -1084,18 +1162,29 @@ function handleSelectPerson(auction, ws, data) {
         ws.send(JSON.stringify({ type: 'error', message: 'Auction is full.' }));
         return false;
     }
-    const currentOwnerEntry = [...auction.clientPersonMap.entries()].find(([, idx]) => idx === data.personIdx);
-    if (currentOwnerEntry && currentOwnerEntry[0] !== ws) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Person already controlled by another participant.' }));
+    const prevIdx = auction.clientPersonMap.get(ws);
+    if (prevIdx === data.personIdx) {
+        sendAuctionState(auction, {
+            ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+        });
+        return true;
+    }
+    if (typeof prevIdx === 'number') {
+        const releaseResult = releasePerson(auction, prevIdx);
+        if (releaseResult && !releaseResult.ok) {
+            sendEngineError(ws, releaseResult);
+            return false;
+        }
+    }
+    const personId = getPersonIdByIndex(auction, data.personIdx);
+    syncEngineStateFromAuction(auction);
+    const result = applyAuctionCommand(auction.engineState, { type: 'claim_person', personId }, Date.now());
+    if (!result.ok) {
+        sendEngineError(ws, result);
         return false;
     }
-    const prevIdx = auction.clientPersonMap.get(ws);
-    if (typeof prevIdx === 'number' && prevIdx !== data.personIdx) {
-        auction.chosenPeople = auction.chosenPeople.filter(idx => idx !== prevIdx);
-    }
-    if (!auction.chosenPeople.includes(data.personIdx)) {
-        auction.chosenPeople.push(data.personIdx);
-    }
+    auction.engineState = result.state;
+    syncAuctionFromEngineState(auction);
     auction.clientPersonMap.set(ws, data.personIdx);
     sendAuctionState(auction, {
         ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
@@ -1103,33 +1192,20 @@ function handleSelectPerson(auction, ws, data) {
     return true;
 }
 
-function releasePerson(auction, personIdx) {
-    if (typeof personIdx !== 'number' || personIdx < 0 || personIdx >= auction.people.length) return false;
-    auction.chosenPeople = auction.chosenPeople.filter(idx => idx !== personIdx);
-    auction.roomSelections = auction.roomSelections.map(arr => arr.filter(i => i !== personIdx));
-    auction.readyPeople = auction.readyPeople.filter(idx => idx !== personIdx);
-    pauseAuctionCountdown(auction);
-    return true;
-}
-
-function pauseAuctionOnBidderDisconnect(auction) {
-    if (!auction || auction.ended || !auction.auctionStartTime) return false;
-    if (auction.tickTimeout) {
-        clearTimeout(auction.tickTimeout);
-        auction.tickTimeout = null;
+function releasePerson(auction, personIdx, reason = 'deselect') {
+    if (typeof personIdx !== 'number' || personIdx < 0 || personIdx >= auction.people.length) return null;
+    const personId = getPersonIdByIndex(auction, personIdx);
+    if (personId === undefined) return null;
+    syncEngineStateFromAuction(auction);
+    const result = applyAuctionCommand(auction.engineState, { type: 'release_person', personId, reason }, Date.now());
+    if (!result.ok) return result;
+    auction.engineState = result.state;
+    applyEngineEffects(auction, result.effects);
+    if (reason !== 'disconnect') {
+        pauseAuctionCountdown(auction);
     }
-    cancelAuctionCountdown(auction);
-    auction.auctionStartTime = null;
-    auction.paused = true;
-    auction.pauseReason = 'bidder_disconnected';
-    auction.readyPeople = [];
-    broadcast(auction, {
-        type: 'auction_paused',
-        reason: 'bidder_disconnected',
-        message: 'Auction paused because a bidder disconnected. Reconnect and mark ready to resume.'
-    });
-    sendAuctionState(auction);
-    return true;
+    syncAuctionFromEngineState(auction);
+    return result;
 }
 
 function cleanupIpHistory(now) {
@@ -1156,7 +1232,8 @@ function cleanupApiHistory(now) {
 
 function handleDeselectPerson(auction, ws, data) {
     if (typeof data.personIdx === 'number' && data.personIdx >= 0 && data.personIdx < auction.people.length) {
-        if (releasePerson(auction, data.personIdx)) {
+        const releaseResult = releasePerson(auction, data.personIdx);
+        if (releaseResult?.ok) {
             auction.clientPersonMap.delete(ws);
             broadcast(auction, {
                 type: 'ready_update',
@@ -1426,18 +1503,22 @@ wss.on('connection', (ws, req) => {
         if (typeof personIdx === 'number') {
             const wasStarted = !!auction.auctionStartTime;
             auction.clientPersonMap.delete(ws);
-            if (releasePerson(auction, personIdx)) {
+            const releaseResult = releasePerson(auction, personIdx, wasStarted ? 'disconnect' : 'deselect');
+            if (releaseResult?.ok) {
                 broadcast(auction, {
                     type: 'ready_update',
                     readyPeople: auction.readyPeople,
                     chosenPeople: auction.chosenPeople,
                     ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
                 });
-                if (wasStarted) {
-                    pauseAuctionOnBidderDisconnect(auction);
-                } else {
-                    sendAuctionState(auction);
+                if (releaseResult.events.some(event => event.type === 'auction_paused')) {
+                    broadcast(auction, {
+                        type: 'auction_paused',
+                        reason: 'bidder_disconnected',
+                        message: 'Auction paused because a bidder disconnected. Reconnect and mark ready to resume.'
+                    });
                 }
+                sendAuctionState(auction);
             }
         }
         if (auction.clients.size === 0) {
