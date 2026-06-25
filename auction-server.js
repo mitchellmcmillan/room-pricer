@@ -7,9 +7,8 @@ import fs from 'fs';
 import path from 'path';
 import { promises as fsp } from 'fs';
 import Database from 'better-sqlite3';
-import { applyAuctionCommand, createAuctionEngineState } from './auction/engine.js';
+import { createAuctionEngineState } from './auction/engine.js';
 import { validateRoomAuctionRoster } from './auction/roster.js';
-import { buildClientAuctionSnapshot } from './auction/snapshot.js';
 import { buildLogCsv as buildLogCsvFromLog, createSqliteAuctionPersistence } from './auction/sqlite-persistence.js';
 import { applyRuntimeAuctionCommand, buildRuntimeAuctionLogSnapshot, personIdAt, roomIdAt } from './auction/runtime.js';
 
@@ -137,59 +136,6 @@ function createAuctionState(id, config) {
         pendingJoinTimers: new Map(),
         engineState
     };
-}
-
-function getPersonIdByIndex(auction, personIdx) {
-    return auction.peopleRecords[personIdx]?.id;
-}
-
-function getRoomIdByIndex(auction, roomIdx) {
-    return auction.roomRecords[roomIdx]?.id;
-}
-
-function syncEngineStateFromAuction(auction) {
-    const selectedRoomByPersonId = {};
-    auction.roomSelections.forEach((personIndices, roomIdx) => {
-        const roomId = getRoomIdByIndex(auction, roomIdx);
-        if (roomId === undefined) return;
-        personIndices.forEach(personIdx => {
-            const personId = getPersonIdByIndex(auction, personIdx);
-            if (personId !== undefined) selectedRoomByPersonId[personId] = roomId;
-        });
-    });
-    auction.engineState = {
-        ...auction.engineState,
-        claimedPersonIds: auction.chosenPeople.map(personIdx => getPersonIdByIndex(auction, personIdx)).filter(id => id !== undefined),
-        readyPersonIds: auction.readyPeople.map(personIdx => getPersonIdByIndex(auction, personIdx)).filter(id => id !== undefined),
-        selectedRoomByPersonId,
-        roomPricesById: Object.fromEntries(auction.roomRecords.map((room, idx) => [room.id, auction.roomPrices[idx] ?? 0])),
-        tickAmount: auction.tickAmount,
-        startedAt: auction.auctionStartTime,
-        paused: auction.paused,
-        pauseReason: auction.pauseReason,
-        countdownEndsAt: auction.auctionCountdownEndTime,
-        timer: auction.timer,
-        allocationLocked: auction.allocationLocked,
-        ended: !!auction.ended
-    };
-}
-
-function syncAuctionFromEngineState(auction) {
-    const snapshot = buildClientAuctionSnapshot(auction.engineState, {
-        peopleRecords: auction.peopleRecords,
-        roomRecords: auction.roomRecords
-    });
-    auction.chosenPeople = snapshot.chosenPeople;
-    auction.readyPeople = snapshot.readyPeople;
-    auction.roomSelections = snapshot.roomSelections;
-    auction.roomPrices = snapshot.roomPrices;
-    auction.auctionStartTime = auction.engineState.startedAt;
-    auction.paused = auction.engineState.paused;
-    auction.pauseReason = auction.engineState.pauseReason;
-    auction.auctionCountdownEndTime = auction.engineState.countdownEndsAt;
-    auction.timer = auction.engineState.timer;
-    auction.allocationLocked = auction.engineState.allocationLocked;
-    auction.ended = auction.engineState.ended;
 }
 
 function applyEngineEffects(auction, effects) {
@@ -450,14 +396,11 @@ function startEngineCountdown(auction, effect) {
     });
     auction.auctionCountdownTimeout = setTimeout(async () => {
         auction.auctionCountdownTimeout = null;
-        syncEngineStateFromAuction(auction);
-        const result = applyAuctionCommand(auction.engineState, { type: 'countdown_elapsed' }, Date.now());
+        const result = applyRuntimeAuctionCommand(auction, { type: 'countdown_elapsed' }, Date.now());
         if (!result.ok) {
             console.error(`[AUCTION] Countdown elapsed failed for ${auction.id}: ${result.error.message}`);
             return;
         }
-        auction.engineState = result.state;
-        syncAuctionFromEngineState(auction);
         await ensureAuctionRecord(auction, auction.auctionStartTime);
         applyEngineEffects(auction, result.effects);
         sendAuctionState(auction);
@@ -672,10 +615,7 @@ async function handleApi(req, res) {
             sendJson(res, 404, { error: 'Auction not found', code: 'not_found' });
             return true;
         }
-        syncEngineStateFromAuction(auction);
-        const result = applyAuctionCommand(auction.engineState, { type: 'end' }, Date.now());
-        auction.engineState = result.state;
-        syncAuctionFromEngineState(auction);
+        const result = applyRuntimeAuctionCommand(auction, { type: 'end' }, Date.now());
         applyEngineEffects(auction, result.effects);
         broadcast(auction, { type: 'auction_end' });
         sendJson(res, 200, { auctionId: auction.id, externalId: auction.externalId, ended: true });
