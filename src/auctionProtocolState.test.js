@@ -6,6 +6,7 @@ import {
     applyAuctionProtocolMessage,
     createAuctionProtocolState,
     deriveAuctionProtocolView,
+    readyAuctionProtocolPerson,
     selectAuctionProtocolPerson,
     selectAuctionProtocolRoom
 } from "./auctionProtocolState.js";
@@ -40,6 +41,7 @@ test("auction update applies server state and derives bidder UI flags", () => {
     const view = deriveAuctionProtocolView(result.state);
     assert.equal(view.allRoomsSelected, true);
     assert.equal(view.showReadyButton, true);
+    assert.equal(view.showReadyMessage, false);
     assert.equal(view.readyCountLabel, "1/2 bidders ready");
 });
 
@@ -89,6 +91,26 @@ test("local bidder selection intents update protocol state", () => {
     assert.equal(moved.userRoom, 0);
     assert.equal(moved.actionError, null);
     assert.equal(selectAuctionProtocolRoom(selected, 99), selected);
+});
+
+test("ready view state and optimistic ready intent stay in protocol state", () => {
+    const readyPrompt = createAuctionProtocolState({
+        people: ["Ada", "Bo"],
+        roomNames: ["Blue", "Green"],
+        roomSelections: [[0], [1]],
+        selectedPerson: 1,
+        userRoom: 1
+    });
+    assert.equal(deriveAuctionProtocolView(readyPrompt).showReadyButton, true);
+    assert.equal(deriveAuctionProtocolView({ ...readyPrompt, auctionStarted: true }).showReadyButton, false);
+
+    const readyState = readyAuctionProtocolPerson(readyPrompt);
+    assert.equal(readyState.ready, true);
+    assert.equal(readyState.selectedPerson, 1);
+    assert.equal(readyState.userRoom, 1);
+    assert.equal(readyState.auctionStarted, false);
+    assert.equal(deriveAuctionProtocolView(readyState).showReadyMessage, true);
+    assert.equal(deriveAuctionProtocolView({ ...readyState, auctionStarted: true }).showReadyMessage, false);
 });
 
 test("pause and countdown expiry keep existing auction start behaviour", () => {

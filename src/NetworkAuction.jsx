@@ -6,6 +6,7 @@ import {
     applyAuctionProtocolSocketError,
     createAuctionProtocolState,
     deriveAuctionProtocolView,
+    readyAuctionProtocolPerson,
     selectAuctionProtocolPerson,
     selectAuctionProtocolRoom
 } from "./auctionProtocolState.js";
@@ -40,10 +41,8 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
         actionError,
         auctionEnded,
         chosenPeople,
-        ready,
         auctionCountdownEndTime,
-        auctionPaused,
-        auctionStarted
+        auctionPaused
     } = protocolState;
     const protocolView = deriveAuctionProtocolView(protocolState);
 
@@ -356,12 +355,12 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                     chosenPeople={chosenPeople}
                     allRoomsSelected={protocolView.allRoomsSelected}
                     readyUI={
-                        (protocolView.showReadyButton && !auctionStarted) ? (
+                        protocolView.showReadyButton ? (
                             <div style={{ textAlign: 'center', width: '100%' }}>
                                 <button
                                     style={{ fontSize: '1.2em', padding: '0.5em 1.5em', background: '#1976d2', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', margin: 0 }}
                                     onClick={() => {
-                                        setProtocolState(prev => ({ ...prev, ready: true }));
+                                        setProtocolState(prev => readyAuctionProtocolPerson(prev));
                                         wsRef.current?.send(JSON.stringify({
                                             type: "set_ready",
                                             personIdx: selectedPerson,
@@ -375,7 +374,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
                                     {protocolView.readyCountLabel}
                                 </div>
                             </div>
-                        ) : (ready && !auctionCountdownEndTime && !auctionStarted) ? (
+                        ) : protocolView.showReadyMessage ? (
                             <div style={{ textAlign: 'center', width: '100%' }}>
                                 <div style={{ color: '#4caf50', fontWeight: 'bold', margin: 0 }}>
                                     Ready!

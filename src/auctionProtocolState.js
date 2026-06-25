@@ -147,6 +147,13 @@ export function selectAuctionProtocolRoom(state, roomIdx) {
     };
 }
 
+export function readyAuctionProtocolPerson(state) {
+    return {
+        ...state,
+        ready: true
+    };
+}
+
 export function advanceAuctionProtocolClock(state, now = Date.now()) {
     if (!state.auctionCountdownEndTime) return state;
     if (state.auctionCountdownEndTime > now) return state;
@@ -166,7 +173,9 @@ export function deriveAuctionProtocolView(state, options = {}) {
         state.selectedPerson !== null &&
         state.userRoom !== null &&
         !state.ready &&
-        !state.auctionCountdownEndTime;
+        !state.auctionCountdownEndTime &&
+        !state.auctionStarted;
+    const showReadyMessage = state.ready && !state.auctionCountdownEndTime && !state.auctionStarted;
     const showCountdown = !!state.auctionCountdownEndTime;
     const countdownSeconds = showCountdown
         ? Math.max(0, Math.ceil((state.auctionCountdownEndTime - now) / 1000))
@@ -177,6 +186,7 @@ export function deriveAuctionProtocolView(state, options = {}) {
         totalPeople,
         allRoomsSelected,
         showReadyButton,
+        showReadyMessage,
         showCountdown,
         countdownSeconds,
         readyCountLabel: `${state.readyPeople.length}/${totalPeople || "?"} bidders ready`,
