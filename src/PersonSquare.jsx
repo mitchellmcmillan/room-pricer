@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 
 export default function PersonSquare({
     name = "Person 1",
@@ -9,27 +9,14 @@ export default function PersonSquare({
     disabled = false // <-- add disabled prop
 }) {
     const size = 120;
-    const [hovered, setHovered] = useState(false);
-    // Minor darken background color on hover
-    function darkenColor(hex, amount = 6) {
-        hex = hex.replace('#', '');
-        if (hex.length === 3) hex = hex.split('').map(x => x + x).join('');
-        let r = parseInt(hex.substring(0, 2), 16);
-        let g = parseInt(hex.substring(2, 4), 16);
-        let b = parseInt(hex.substring(4, 6), 16);
-        r = Math.max(0, r - amount);
-        g = Math.max(0, g - amount);
-        b = Math.max(0, b - amount);
-        return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-    }
-    const bg = hovered ? darkenColor(background, 6) : background;
     return (
         <div
+            className="hover-dim"
             style={{
                 width: size,
                 height: size,
                 borderRadius: 8,
-                backgroundColor: bg,
+                backgroundColor: background,
                 border,
                 boxSizing: 'border-box',
                 position: 'relative',
@@ -44,8 +31,6 @@ export default function PersonSquare({
                 opacity: disabled ? 0.5 : 1,
                 pointerEvents: disabled ? 'none' : 'auto',
             }}
-            onMouseEnter={() => !disabled && setHovered(true)}
-            onMouseLeave={() => setHovered(false)}
             onClick={(!disabled && typeof onClick === 'function') ? onClick : undefined}
             aria-disabled={disabled}
             tabIndex={disabled ? -1 : 0}

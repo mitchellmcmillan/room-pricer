@@ -1,3 +1,5 @@
+import { validateRoomAuctionRoster } from './roster.js';
+
 export function createSqliteAuctionPersistence(database, options = {}) {
     const tickIntervalMs = options.tickIntervalMs ?? 10000;
     const tickAmount = options.tickAmount ?? 1;
@@ -37,6 +39,10 @@ export function createSqliteAuctionPersistence(database, options = {}) {
     function saveRoster(roster) {
         const incomingPeople = Array.isArray(roster?.people) ? roster.people : [];
         const incomingRooms = Array.isArray(roster?.rooms) ? roster.rooms : [];
+        const validation = validateRoomAuctionRoster({ people: incomingPeople, rooms: incomingRooms });
+        if (!validation.ok) {
+            throw new Error(validation.error.message);
+        }
         const tx = database.transaction(() => {
             database.exec(`
                 DELETE FROM tick_room_people;

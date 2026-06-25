@@ -13,8 +13,6 @@ import { buildClientAuctionSnapshot } from './auction/snapshot.js';
 import { buildLogCsv as buildLogCsvFromLog, createSqliteAuctionPersistence } from './auction/sqlite-persistence.js';
 
 const PORT = 8080;
-const DIST_DIR = path.resolve('dist');
-const INDEX_FILE = path.join(DIST_DIR, 'index.html');
 const LOG_DIR = path.resolve('log');
 const DB_PATH = path.join(LOG_DIR, 'auction-log.sqlite');
 
@@ -372,6 +370,12 @@ function withConfigPayload(auction, data = {}) {
         payload.auctionCountdownEndTime = auction.auctionCountdownEndTime || null;
     }
     return payload;
+}
+
+function countdownPayload(auction) {
+    return auction.auctionCountdownEndTime && !auction.auctionStartTime
+        ? { auctionCountdownEndTime: auction.auctionCountdownEndTime }
+        : {};
 }
 
 function broadcast(auction, data) {
@@ -931,9 +935,7 @@ function handleSelectRoom(auction, ws, data) {
     }
     auction.engineState = result.state;
     syncAuctionFromEngineState(auction);
-    sendAuctionState(auction, {
-        ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
-    });
+    sendAuctionState(auction, countdownPayload(auction));
     return true;
 }
 
@@ -953,9 +955,7 @@ function handleSelectPerson(auction, ws, data) {
     }
     const prevIdx = auction.clientPersonMap.get(ws);
     if (prevIdx === data.personIdx) {
-        sendAuctionState(auction, {
-            ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
-        });
+        sendAuctionState(auction, countdownPayload(auction));
         return true;
     }
     if (typeof prevIdx === 'number') {
@@ -975,9 +975,7 @@ function handleSelectPerson(auction, ws, data) {
     auction.engineState = result.state;
     syncAuctionFromEngineState(auction);
     auction.clientPersonMap.set(ws, data.personIdx);
-    sendAuctionState(auction, {
-        ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
-    });
+    sendAuctionState(auction, countdownPayload(auction));
     return true;
 }
 
@@ -998,23 +996,20 @@ function releasePerson(auction, personIdx, reason = 'deselect') {
 }
 
 function cleanupIpHistory(now) {
-    for (const [ip, timestamps] of ipConnectionHistory.entries()) {
-        const recent = timestamps.filter(ts => now - ts < IP_HISTORY_TTL_MS);
-        if (recent.length > 0) {
-            ipConnectionHistory.set(ip, recent);
-        } else {
-            ipConnectionHistory.delete(ip);
-        }
-    }
+    cleanupHistory(ipConnectionHistory, now, IP_HISTORY_TTL_MS);
 }
 
 function cleanupApiHistory(now) {
-    for (const [ip, timestamps] of apiIpHistory.entries()) {
-        const recent = timestamps.filter(ts => now - ts < 60000);
+    cleanupHistory(apiIpHistory, now, 60000);
+}
+
+function cleanupHistory(history, now, ttlMs) {
+    for (const [ip, timestamps] of history.entries()) {
+        const recent = timestamps.filter(ts => now - ts < ttlMs);
         if (recent.length > 0) {
-            apiIpHistory.set(ip, recent);
+            history.set(ip, recent);
         } else {
-            apiIpHistory.delete(ip);
+            history.delete(ip);
         }
     }
 }
@@ -1028,11 +1023,9 @@ function handleDeselectPerson(auction, ws, data) {
                 type: 'ready_update',
                 readyPeople: auction.readyPeople,
                 chosenPeople: auction.chosenPeople,
-                ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+                ...countdownPayload(auction)
             });
-            sendAuctionState(auction, {
-                ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
-            });
+            sendAuctionState(auction, countdownPayload(auction));
             return true;
         }
     }
@@ -1061,9 +1054,7 @@ async function handleStartAuction(auction) {
     await ensureAuctionRecord(auction, auction.auctionStartTime);
     console.log(`[AUCTION] Auction ${auction.id} started, scheduling first tick.`);
     applyEngineEffects(auction, result.effects);
-    sendAuctionState(auction, {
-        ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
-    });
+    sendAuctionState(auction, countdownPayload(auction));
     return true;
 }
 
@@ -1100,7 +1091,7 @@ async function handleReadyUpdate(auction, ws, data) {
         type: 'ready_update',
         readyPeople: auction.readyPeople,
         chosenPeople: auction.chosenPeople,
-        ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+        ...countdownPayload(auction)
     });
     return true;
 }
@@ -1213,7 +1204,6 @@ wss.on('connection', (ws, req) => {
         }
     }, PENDING_JOIN_TIMEOUT_MS);
     auction.pendingJoinTimers.set(ws, pendingTimer);
-    incMetric('ws_connects_total');
 
     ws.on('error', err => {
         console.error('WebSocket connection error:', err);
@@ -1298,7 +1288,7 @@ wss.on('connection', (ws, req) => {
                     type: 'ready_update',
                     readyPeople: auction.readyPeople,
                     chosenPeople: auction.chosenPeople,
-                    ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+                    ...countdownPayload(auction)
                 });
                 if (releaseResult.events.some(event => event.type === 'auction_paused')) {
                     broadcast(auction, {
@@ -1327,13 +1317,13 @@ wss.on('connection', (ws, req) => {
         timer: auction.timer,
         chosenPeople: auction.chosenPeople,
         readyPeople: auction.readyPeople,
-        ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+        ...countdownPayload(auction)
     })));
     broadcast(auction, {
         type: 'ready_update',
         readyPeople: auction.readyPeople,
         chosenPeople: auction.chosenPeople,
-        ...(auction.auctionCountdownEndTime && !auction.auctionStartTime ? { auctionCountdownEndTime: auction.auctionCountdownEndTime } : {})
+        ...countdownPayload(auction)
     });
     incMetric('ws_connects_total');
 });

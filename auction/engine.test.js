@@ -111,6 +111,22 @@ test('a person must be claimed before selecting a room', () => {
     });
 });
 
+test('a room selection requires an existing person', () => {
+    const state = {
+        ...createAuctionEngineState(roster),
+        claimedPersonIds: [1]
+    };
+    const result = applyAuctionCommand(state, { type: 'select_room', personId: 99, roomId: 10 }, 1000);
+
+    assert.deepEqual(result, {
+        ok: false,
+        error: {
+            code: 'unknown_person',
+            message: 'Unknown person.'
+        }
+    });
+});
+
 test('a room selection requires an existing room', () => {
     const state = {
         ...createAuctionEngineState(roster),

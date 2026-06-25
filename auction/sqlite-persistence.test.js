@@ -33,6 +33,18 @@ test('saved roster is readable in auction order', () => {
     assert.deepEqual(result.rooms.map(({ name, description, initialPrice }) => ({ name, description, initialPrice })), roster.rooms);
 });
 
+test('saving a mismatched roster is rejected before persistence', () => {
+    const persistence = createPersistence();
+
+    assert.throws(
+        () => persistence.saveRoster({
+            people: [{ name: 'Ada', emoji: 'A' }, { name: 'Ben', emoji: 'B' }],
+            rooms: [{ name: 'North', description: 'Front room', initialPrice: 100 }]
+        }),
+        /Room auction requires the same number of people and rooms\./
+    );
+});
+
 test('reading an auction with no snapshots returns roster and empty ticks', () => {
     const persistence = createPersistence();
     persistence.saveRoster(roster);

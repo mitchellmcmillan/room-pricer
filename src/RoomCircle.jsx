@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 
 export default function RoomCircle({
     name = "Room 1",
@@ -34,20 +34,7 @@ export default function RoomCircle({
         }
     };
 
-    const [hovered, setHovered] = useState(false);
     const styles = getCircleStyles(numPeople);
-    // Minor darken background color on hover
-    function darkenColor(hex, amount = 6) {
-        hex = hex.replace('#', '');
-        if (hex.length === 3) hex = hex.split('').map(x => x + x).join('');
-        let r = parseInt(hex.substring(0, 2), 16);
-        let g = parseInt(hex.substring(2, 4), 16);
-        let b = parseInt(hex.substring(4, 6), 16);
-        r = Math.max(0, r - amount);
-        g = Math.max(0, g - amount);
-        b = Math.max(0, b - amount);
-        return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-    }
     const size = 200;
     const strokeWidth = 6;
     const radius = (size / 2) - (strokeWidth / 2);
@@ -83,9 +70,9 @@ export default function RoomCircle({
             }}
         >
             <div
+                className={canSelect ? "hover-dim" : undefined}
                 style={{
                     ...styles,
-                    background: hovered ? darkenColor(styles.background, 6) : styles.background,
                     borderRadius: "50%",
                     width: size,
                     height: size,
@@ -100,8 +87,6 @@ export default function RoomCircle({
                     position: "relative",
                     zIndex: 1,
                 }}
-                onMouseEnter={() => setHovered(true)}
-                onMouseLeave={() => setHovered(false)}
             >
                 <div
                     style={{

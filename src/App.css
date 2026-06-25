@@ -2,10 +2,6 @@
   min-height: 100vh;
 }
 
-.panel {
-  transition: all 550ms ease;
-}
-
 .list-row {
   animation: fadeGrow 500ms ease;
   transform-origin: top;
@@ -13,6 +9,10 @@
 
 .list-row.removing {
   animation: fadeShrink 250ms ease forwards;
+}
+
+.hover-dim:hover {
+  filter: brightness(0.96);
 }
 
 @keyframes fadeGrow {
