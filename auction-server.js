@@ -11,7 +11,7 @@ import { applyAuctionCommand, createAuctionEngineState } from './auction/engine.
 import { validateRoomAuctionRoster } from './auction/roster.js';
 import { buildClientAuctionSnapshot } from './auction/snapshot.js';
 import { buildLogCsv as buildLogCsvFromLog, createSqliteAuctionPersistence } from './auction/sqlite-persistence.js';
-import { applyRuntimeAuctionCommand, personIdAt, roomIdAt } from './auction/runtime.js';
+import { applyRuntimeAuctionCommand, buildRuntimeAuctionLogSnapshot, personIdAt, roomIdAt } from './auction/runtime.js';
 
 const PORT = 8080;
 const LOG_DIR = path.resolve('log');
@@ -872,20 +872,7 @@ async function logTick(auction) {
     try {
         await ensureLogDir();
         await ensureAuctionRecord(auction, auction.auctionStartTime);
-        auctionPersistence.appendLogSnapshot({
-            auctionDbId: auction.auctionDbId,
-            externalId: auction.externalId || auction.id,
-            startedAtMs: auction.auctionStartTime,
-            tickTime: new Date().toISOString(),
-            timer: auction.timer,
-            rooms: auction.roomSelections.map((indices, idx) => ({
-                roomId: auction.roomRecords[idx]?.id,
-                price: auction.roomPrices[idx] ?? 0,
-                selectors: indices
-                    .map(personIdx => auction.peopleRecords[personIdx]?.id)
-                    .filter(personId => personId !== undefined)
-            })).filter(room => room.roomId !== undefined)
-        });
+        auctionPersistence.appendLogSnapshot(buildRuntimeAuctionLogSnapshot(auction, new Date().toISOString()));
     } catch (e) {
         console.error('[LOG] Failed to write log tick to sqlite:', e);
     }

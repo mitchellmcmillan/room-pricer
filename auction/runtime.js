@@ -18,6 +18,23 @@ export function applyRuntimeAuctionCommand(auction, command, now) {
     return result;
 }
 
+export function buildRuntimeAuctionLogSnapshot(auction, tickTime) {
+    return {
+        auctionDbId: auction.auctionDbId,
+        externalId: auction.externalId || auction.id,
+        startedAtMs: auction.auctionStartTime,
+        tickTime,
+        timer: auction.timer,
+        rooms: auction.roomSelections.map((indices, idx) => ({
+            roomId: auction.roomRecords[idx]?.id,
+            price: auction.roomPrices[idx] ?? 0,
+            selectors: indices
+                .map(personIdx => auction.peopleRecords[personIdx]?.id)
+                .filter(personId => personId !== undefined)
+        })).filter(room => room.roomId !== undefined)
+    };
+}
+
 function syncEngineStateFromRuntime(auction) {
     const selectedRoomByPersonId = {};
     auction.roomSelections.forEach((personIndices, roomIdx) => {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createAuctionEngineState } from './engine.js';
-import { applyRuntimeAuctionCommand, personIdAt, roomIdAt } from './runtime.js';
+import { applyRuntimeAuctionCommand, buildRuntimeAuctionLogSnapshot, personIdAt, roomIdAt } from './runtime.js';
 
 function createRuntimeAuction() {
     const peopleRecords = [{ id: 1, name: 'Ada', emoji: 'A' }, { id: 2, name: 'Bo', emoji: 'B' }];
@@ -56,4 +56,28 @@ test('runtime auction command keeps engine IDs and client indices in sync', () =
     assert.deepEqual(auction.engineState.roomPricesById, { 10: 100, 20: 95 });
     assert.deepEqual(auction.roomPrices, [100, 95]);
     assert.equal(auction.timer, 1);
+});
+
+test('runtime log snapshot maps client indices to persisted IDs', () => {
+    const auction = {
+        ...createRuntimeAuction(),
+        auctionDbId: 'auction-db',
+        externalId: 'public-key',
+        auctionStartTime: 1000,
+        timer: 3,
+        roomPrices: [105, 95],
+        roomSelections: [[0, 99], [1]]
+    };
+
+    assert.deepEqual(buildRuntimeAuctionLogSnapshot(auction, '2026-01-01T00:00:00.000Z'), {
+        auctionDbId: 'auction-db',
+        externalId: 'public-key',
+        startedAtMs: 1000,
+        tickTime: '2026-01-01T00:00:00.000Z',
+        timer: 3,
+        rooms: [
+            { roomId: 10, price: 105, selectors: [1] },
+            { roomId: 20, price: 95, selectors: [2] }
+        ]
+    });
 });
