@@ -11,6 +11,7 @@ import { applyAuctionCommand, createAuctionEngineState } from './auction/engine.
 import { validateRoomAuctionRoster } from './auction/roster.js';
 import { buildClientAuctionSnapshot } from './auction/snapshot.js';
 import { buildLogCsv as buildLogCsvFromLog, createSqliteAuctionPersistence } from './auction/sqlite-persistence.js';
+import { applyRuntimeAuctionCommand, personIdAt, roomIdAt } from './auction/runtime.js';
 
 const PORT = 8080;
 const LOG_DIR = path.resolve('log');
@@ -778,16 +779,13 @@ server.listen(PORT, () => {
 });
 
 function updateAuctionLogic(auction) {
-    syncEngineStateFromAuction(auction);
-    const result = applyAuctionCommand(auction.engineState, { type: 'tick' }, Date.now());
+    const result = applyRuntimeAuctionCommand(auction, { type: 'tick' }, Date.now());
     if (!result.ok) {
         console.log(`[TICK] ${result.error.message}`);
         return false;
     }
     console.log(`[TICK] Price update at timer=${auction.timer} for ${auction.id}`);
     console.log(`[TICK] Prices before: ${JSON.stringify(auction.roomPrices)}`);
-    auction.engineState = result.state;
-    syncAuctionFromEngineState(auction);
     console.log(`[TICK] Prices after:  ${JSON.stringify(auction.roomPrices)}`);
     if (result.events.some(event => event.type === 'allocation_locked')) {
         console.log(`[AUCTION] Allocation found for ${auction.externalId || auction.id}; restart disabled.`);
@@ -925,16 +923,13 @@ function handleSelectRoom(auction, ws, data) {
         ws.send(JSON.stringify({ type: 'error', message: 'You may only move the person you control.' }));
         return false;
     }
-    const personId = getPersonIdByIndex(auction, data.personIdx);
-    const roomId = getRoomIdByIndex(auction, data.roomIdx);
-    syncEngineStateFromAuction(auction);
-    const result = applyAuctionCommand(auction.engineState, { type: 'select_room', personId, roomId }, Date.now());
+    const personId = personIdAt(auction, data.personIdx);
+    const roomId = roomIdAt(auction, data.roomIdx);
+    const result = applyRuntimeAuctionCommand(auction, { type: 'select_room', personId, roomId }, Date.now());
     if (!result.ok) {
         sendEngineError(ws, result);
         return false;
     }
-    auction.engineState = result.state;
-    syncAuctionFromEngineState(auction);
     sendAuctionState(auction, countdownPayload(auction));
     return true;
 }
@@ -965,15 +960,12 @@ function handleSelectPerson(auction, ws, data) {
             return false;
         }
     }
-    const personId = getPersonIdByIndex(auction, data.personIdx);
-    syncEngineStateFromAuction(auction);
-    const result = applyAuctionCommand(auction.engineState, { type: 'claim_person', personId }, Date.now());
+    const personId = personIdAt(auction, data.personIdx);
+    const result = applyRuntimeAuctionCommand(auction, { type: 'claim_person', personId }, Date.now());
     if (!result.ok) {
         sendEngineError(ws, result);
         return false;
     }
-    auction.engineState = result.state;
-    syncAuctionFromEngineState(auction);
     auction.clientPersonMap.set(ws, data.personIdx);
     sendAuctionState(auction, countdownPayload(auction));
     return true;
@@ -981,17 +973,14 @@ function handleSelectPerson(auction, ws, data) {
 
 function releasePerson(auction, personIdx, reason = 'deselect') {
     if (typeof personIdx !== 'number' || personIdx < 0 || personIdx >= auction.people.length) return null;
-    const personId = getPersonIdByIndex(auction, personIdx);
+    const personId = personIdAt(auction, personIdx);
     if (personId === undefined) return null;
-    syncEngineStateFromAuction(auction);
-    const result = applyAuctionCommand(auction.engineState, { type: 'release_person', personId, reason }, Date.now());
+    const result = applyRuntimeAuctionCommand(auction, { type: 'release_person', personId, reason }, Date.now());
     if (!result.ok) return result;
-    auction.engineState = result.state;
     applyEngineEffects(auction, result.effects);
     if (reason !== 'disconnect') {
         pauseAuctionCountdown(auction);
     }
-    syncAuctionFromEngineState(auction);
     return result;
 }
 
@@ -1044,13 +1033,10 @@ function getAuctionByKey(key) {
 
 async function handleStartAuction(auction) {
     if (auction.ended) return false;
-    syncEngineStateFromAuction(auction);
-    const result = applyAuctionCommand(auction.engineState, { type: 'start' }, Date.now());
+    const result = applyRuntimeAuctionCommand(auction, { type: 'start' }, Date.now());
     if (!result.ok) {
         return false;
     }
-    auction.engineState = result.state;
-    syncAuctionFromEngineState(auction);
     await ensureAuctionRecord(auction, auction.auctionStartTime);
     console.log(`[AUCTION] Auction ${auction.id} started, scheduling first tick.`);
     applyEngineEffects(auction, result.effects);
@@ -1072,9 +1058,8 @@ async function handleReadyUpdate(auction, ws, data) {
         ws.send(JSON.stringify({ type: 'error', message: 'You may only ready the person you control.' }));
         return;
     }
-    const personId = getPersonIdByIndex(auction, data.personIdx);
-    syncEngineStateFromAuction(auction);
-    const result = applyAuctionCommand(auction.engineState, {
+    const personId = personIdAt(auction, data.personIdx);
+    const result = applyRuntimeAuctionCommand(auction, {
         type: 'set_ready',
         personId,
         ready: data.ready,
@@ -1084,8 +1069,6 @@ async function handleReadyUpdate(auction, ws, data) {
         sendEngineError(ws, result);
         return false;
     }
-    auction.engineState = result.state;
-    syncAuctionFromEngineState(auction);
     applyEngineEffects(auction, result.effects);
     broadcast(auction, {
         type: 'ready_update',
