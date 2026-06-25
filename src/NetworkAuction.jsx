@@ -5,7 +5,9 @@ import {
     applyAuctionProtocolMessage,
     applyAuctionProtocolSocketError,
     createAuctionProtocolState,
-    deriveAuctionProtocolView
+    deriveAuctionProtocolView,
+    selectAuctionProtocolPerson,
+    selectAuctionProtocolRoom
 } from "./auctionProtocolState.js";
 import { API_BASE, getWebSocketUrl } from "./networkConfig";
 
@@ -167,16 +169,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
 
     function handlePersonSelect(idx) {
         if (idx < 0 || idx >= people.length) return;
-        setProtocolState(prev => {
-            const roomIdx = prev.roomSelections.findIndex(selection => selection.includes(idx));
-            return {
-                ...prev,
-                selectedPerson: idx,
-                userRoom: roomIdx >= 0 ? roomIdx : null,
-                stage: "auction",
-                ready: prev.readyPeople.includes(idx)
-            };
-        });
+        setProtocolState(prev => selectAuctionProtocolPerson(prev, idx));
         wsRef.current?.send(JSON.stringify({
             type: "select_person",
             personIdx: idx
@@ -185,11 +178,7 @@ export default function NetworkAuction({ initialAuctionKey = "", autoCreate = fa
 
     function handleRoomSelect(idx) {
         if (idx < 0 || idx >= roomNames.length) return;
-        setProtocolState(prev => ({
-            ...prev,
-            userRoom: idx,
-            actionError: null
-        }));
+        setProtocolState(prev => selectAuctionProtocolRoom(prev, idx));
         if (selectedPerson !== null) {
             wsRef.current?.send(JSON.stringify({
                 type: "select_room",

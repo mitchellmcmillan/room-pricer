@@ -5,7 +5,9 @@ import {
     advanceAuctionProtocolClock,
     applyAuctionProtocolMessage,
     createAuctionProtocolState,
-    deriveAuctionProtocolView
+    deriveAuctionProtocolView,
+    selectAuctionProtocolPerson,
+    selectAuctionProtocolRoom
 } from "./auctionProtocolState.js";
 
 test("auction update applies server state and derives bidder UI flags", () => {
@@ -65,6 +67,28 @@ test("ready update and countdown messages drive countdown UI", () => {
     const view = deriveAuctionProtocolView(countdownResult.state, { now: 9200 });
     assert.equal(view.showCountdown, true);
     assert.equal(view.countdownSeconds, 3);
+});
+
+test("local bidder selection intents update protocol state", () => {
+    const state = createAuctionProtocolState({
+        people: ["Ada", "Bo"],
+        roomNames: ["Blue", "Green"],
+        roomSelections: [[0], [1]],
+        readyPeople: [1],
+        actionError: "Previous error"
+    });
+
+    const selected = selectAuctionProtocolPerson(state, 1);
+    assert.equal(selected.selectedPerson, 1);
+    assert.equal(selected.userRoom, 1);
+    assert.equal(selected.stage, "auction");
+    assert.equal(selected.ready, true);
+    assert.equal(selectAuctionProtocolPerson(state, 99), state);
+
+    const moved = selectAuctionProtocolRoom(selected, 0);
+    assert.equal(moved.userRoom, 0);
+    assert.equal(moved.actionError, null);
+    assert.equal(selectAuctionProtocolRoom(selected, 99), selected);
 });
 
 test("pause and countdown expiry keep existing auction start behaviour", () => {

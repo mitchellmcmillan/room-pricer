@@ -126,6 +126,27 @@ export function applyAuctionProtocolSocketError(state) {
     };
 }
 
+export function selectAuctionProtocolPerson(state, personIdx) {
+    if (personIdx < 0 || personIdx >= state.people.length) return state;
+    const roomIdx = state.roomSelections.findIndex(selection => selection.includes(personIdx));
+    return {
+        ...state,
+        selectedPerson: personIdx,
+        userRoom: roomIdx >= 0 ? roomIdx : null,
+        stage: "auction",
+        ready: state.readyPeople.includes(personIdx)
+    };
+}
+
+export function selectAuctionProtocolRoom(state, roomIdx) {
+    if (roomIdx < 0 || roomIdx >= state.roomNames.length) return state;
+    return {
+        ...state,
+        userRoom: roomIdx,
+        actionError: null
+    };
+}
+
 export function advanceAuctionProtocolClock(state, now = Date.now()) {
     if (!state.auctionCountdownEndTime) return state;
     if (state.auctionCountdownEndTime > now) return state;
