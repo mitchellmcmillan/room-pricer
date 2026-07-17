@@ -266,6 +266,22 @@ function StartPage() {
     return next;
   };
 
+  const generateExampleData = () => {
+    setPeople([
+      { id: generateId(), name: 'Alice', emoji: '👩' },
+      { id: generateId(), name: 'Bob', emoji: '👨' },
+      { id: generateId(), name: 'Charlie', emoji: '🧑' },
+      { id: generateId(), name: 'Dana', emoji: '👩‍🦰' }
+    ]);
+    setRooms([
+      { id: generateId(), name: 'Master bedroom', description: 'Large room with ensuite', initialPrice: '800' },
+      { id: generateId(), name: 'Garden room', description: 'Quiet room overlooking the garden', initialPrice: '650' },
+      { id: generateId(), name: 'Front room', description: 'Bright room near the entrance', initialPrice: '550' },
+      { id: generateId(), name: 'Small room', description: 'Compact room with lots of storage', initialPrice: '400' }
+    ]);
+    setError(null);
+  };
+
   React.useEffect(() => {
     if (pickerOpen === null) return;
     const el = pickerRefs.current[pickerOpen];
@@ -340,9 +356,14 @@ function StartPage() {
           <h1 style={{ margin: 0 }}>Host a new auction</h1>
           <div style={{ color: '#666' }}>Share the key with participants to join.</div>
         </div>
-        <button onClick={() => navigate('/')} style={{ padding: '0.6em 0.9em', borderRadius: 8, border: '1px solid #d5dce5', background: '#fff', cursor: 'pointer' }}>
-          ← Back
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={generateExampleData} style={{ padding: '0.6em 0.9em', borderRadius: 8, border: '1px solid #d5dce5', background: '#f5f7fa', fontWeight: 600, cursor: 'pointer' }}>
+            Generate example data
+          </button>
+          <button onClick={() => navigate('/')} style={{ padding: '0.6em 0.9em', borderRadius: 8, border: '1px solid #d5dce5', background: '#fff', cursor: 'pointer' }}>
+            ← Back
+          </button>
+        </div>
       </div>
       <div style={{ fontSize: 16, fontWeight: 700, color: '#1a2a5a' }}>
         Auction key: <span style={{ fontFamily: 'monospace', background: '#f0f4ff', padding: '4px 6px', borderRadius: 6 }}>{createdKey || 'Will be generated when created'}</span>
