@@ -1,4 +1,39 @@
-import React from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
+
+const textFitsCircle = (textElement, circleElement) => {
+    const circle = circleElement.getBoundingClientRect();
+    const textRange = document.createRange();
+    textRange.selectNodeContents(textElement);
+    const text = textRange.getBoundingClientRect();
+    const cx = circle.left + circle.width / 2;
+    const cy = circle.top + circle.height / 2;
+    const radius = Math.min(circle.width, circle.height) / 2 - 2;
+    return [[text.left, text.top], [text.right, text.top], [text.left, text.bottom], [text.right, text.bottom]]
+        .every(([x, y]) => Math.hypot(x - cx, y - cy) <= radius);
+};
+
+const useFittedCircleFontSize = (maxFontSize, text) => {
+    const ref = useRef(null);
+    const [fontSize, setFontSize] = useState(maxFontSize);
+
+    useLayoutEffect(() => {
+        const textElement = ref.current;
+        const circleElement = textElement?.closest('[data-testid="room-circle"]');
+        if (!textElement || !circleElement) return;
+
+        let low = 1;
+        let high = maxFontSize;
+        for (let i = 0; i < 8; i += 1) {
+            const candidate = (low + high) / 2;
+            textElement.style.fontSize = `${candidate}px`;
+            if (textFitsCircle(textElement, circleElement)) low = candidate;
+            else high = candidate;
+        }
+        setFontSize(low);
+    }, [maxFontSize, text]);
+
+    return [ref, fontSize];
+};
 
 export default function RoomCircle({
     name = "Room 1",
@@ -12,6 +47,8 @@ export default function RoomCircle({
     canSelect = true,
     progress,
 }) {
+    const [nameRef, nameFontSize] = useFittedCircleFontSize(28, name);
+    const [descriptionRef, descriptionFontSize] = useFittedCircleFontSize(16, description);
     const getCircleStyles = (numPeople) => {
         if (numPeople === 0) {
             return {
@@ -70,6 +107,7 @@ export default function RoomCircle({
             }}
         >
             <div
+                data-testid="room-circle"
                 className={canSelect ? "hover-dim" : undefined}
                 style={{
                     ...styles,
@@ -89,9 +127,11 @@ export default function RoomCircle({
                 }}
             >
                 <div
+                    data-testid="room-name"
+                    ref={nameRef}
                     style={{
                         fontWeight: "bold",
-                        fontSize: 28,
+                        fontSize: nameFontSize,
                         height: "30%",
                         display: "flex",
                         alignItems: "center",
@@ -101,6 +141,8 @@ export default function RoomCircle({
                         padding: 0,
                         paddingTop: "7.5%",
                         paddingBottom: 0,
+                        maxWidth: "calc(100% - 4px)",
+                        whiteSpace: "nowrap",
                     }}
                 >
                     {name}
@@ -118,14 +160,18 @@ export default function RoomCircle({
                     {emoji}
                 </div>
                 <div
+                    data-testid="room-description"
+                    ref={descriptionRef}
                     style={{
-                        fontSize: 16,
+                        fontSize: descriptionFontSize,
                         textAlign: "center",
                         height: "15%",
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "center",
                         width: "100%",
+                        maxWidth: "calc(100% - 4px)",
+                        whiteSpace: "nowrap",
                     }}
                 >
                     {description}
